@@ -1453,32 +1453,24 @@ def main(
 
     mol = molecule.lower()
 
+    csv_filename = mol + "_quasi_symmetry_different_abc.csv"
+
     if grid is None:
         if mol == "lih":
             grid = np.linspace(0.8, 6.0, 10)
-            if csv_filename is None:
-                csv_filename = "lih_quasi_symmetry_different_abc.csv"
 
         elif mol == "h2o":
             grid = np.linspace(0.958, 2.5, 10)
-            if csv_filename is None:
-                csv_filename = "h2o_quasi_symmetry_different_abc.csv"
 
         elif mol == "h4_linear":
             grid = np.linspace(0.6, 5.0, 10)
-            if csv_filename is None:
-                csv_filename = "h4_linear_quasi_symmetry_different_abc.csv"
-
 
         elif mol == "h4_square":
             grid = np.linspace(0.6, 3.0, 10)
-            if csv_filename is None:
-                csv_filename = "h4_square_quasi_symmetry_different_abc.csv"
 
         elif mol == "h4_rectangle":
             grid = np.linspace(0.6, 3.0, 10)
-            if csv_filename is None:
-                csv_filename = "h4_rectangle_quasi_symmetry_different_abc.csv"
+
         else:
             raise ValueError(f"Unsupported molecule '{molecule}'")
 
@@ -1496,7 +1488,7 @@ def main(
 
 if __name__ == "__main__":
     # LiH
-    main(molecule="lih")
+    main(molecule="lih", grid=[0.8])
 
     # H2O
     # main(molecule="h2o", hoh_angle_deg=104.5)

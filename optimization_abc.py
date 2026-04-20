@@ -36,10 +36,10 @@ MULTIPLICITY = 1
 BASIS = "sto-3g"
 
 ####
-OPT_METHOD = "Powell" #web says powell good
-MAXITER = 200
-N_RESTARTS = 5
-ANGLE_INIT_SCALE = 0.2
+OPT_METHOD = "L-BFGS-B" #web says powell good
+MAXITER = 100
+N_RESTARTS = 2
+ANGLE_INIT_SCALE = 1e-2
 RANDOM_SEED = 0
 TOPK_ANGLES_TO_PRINT = 10
 
