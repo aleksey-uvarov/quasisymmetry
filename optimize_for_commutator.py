@@ -29,8 +29,29 @@ def expected_squared_commutator(H: np.ndarray,
     return np.linalg.norm(Apsi)**2
 
 
-def expected_commutator_optimization_results():
-    pass
+def commutator_cost_function_fixed_abc(H_full, psi_full):
+    n_spin_orbitals = int(np.log2(psi_full.shape[0]))
+    n_orbitals = n_spin_orbitals // 2
+    pairs = list(combinations(range(n_orbitals), 2))
+    m = len(pairs)
+    def f(x):
+        a = np.sin(x[m]) * np.cos(x[m + 1])
+        b = np.sin(x[m]) * np.sin(x[m + 1])
+        c = np.cos(x[m])
+        U = build_U_from_thetas(n_orbitals, x_id[:m], pairs)
+        total_commutator_norm = 0
+        for i in range(n_orbitals):
+            Si_ferm = normal_ordered(
+                rotated_seniority_orbital_fermion(
+                    U, i, n_orbitals, a, b, c
+                )
+            )
+            Si_mat = fermion_to_sparse_qubit(Si_ferm, n_spin_orbitals)
+            total_commutator_norm += expected_squared_commutator(
+                H_full, Si_mat, psi_full)
+        return total_commutator_norm
+    return f
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
@@ -41,9 +62,12 @@ if __name__=="__main__":
     parser.add_argument("--bond_qty", type=int, help="qty of data points",
                         default=1)
     parser.add_argument("--abcmode", default="locked")
+    parser.add_argument("--optruns", type=int, default=5)
+
     args = parser.parse_args()
 
     bonds = np.linspace(args.bond_min, args.bond_max, args.bond_qty)
+    mol = get_mol(args.mol, bonds[0])
 
     if args.abcmode == "locked":
         csv_filename = args.mol + "_quasi_symmetry_comm_optimization.csv"
@@ -52,14 +76,20 @@ if __name__=="__main__":
     elif args.abcmode == "independent":
         csv_filename = args.mol + "_quasi_symmetry_comm_optimization_different_abc.csv"
         fieldnames = ["Molecule", "Geometry_Param", "E_FCI", "V_0", "V_optimized",
-                      "Sum_CommSq_0", "Sum_CommSq_Optimized", "a_opt", "b_opt", "c_opt"]
+                      "Sum_CommSq_0", "Sum_CommSq_Optimized"]
+        for i in range(mol.n_orbitals):
+            fieldnames += ["a_opt_{0:}".format(i),
+                           "b_opt_{0:}".format(i),
+                           "c_opt_{0:}".format(i)]
     else:
         raise ValueError("abcmode must be 'locked' or 'independent'")
 
     out_data = []
     optimized_parameters = []
+    rng = np.random.default_rng()
 
     for bond in bonds:
+        print()
         print(args.mol, bond)
         mol = get_mol(args.mol, bond)
 
@@ -89,9 +119,11 @@ if __name__=="__main__":
         pairs = list(combinations(range(mol.n_orbitals), 2))
         m = len(pairs)
 
+        gamma_a, gamma_b, gamma_ab = compute_spin_rdms_from_statevector(
+            psi_full, mol.n_orbitals)
+
         if args.abcmode == "independent":
             print("a, b, c independent for every orbital")
-            raise NotImplementedError()
 
             x_id = np.zeros(m + 2 * mol.n_orbitals)
             # we put constrain a^2 + b^2 + c^2 = 1
@@ -114,22 +146,35 @@ if __name__=="__main__":
 
             print(time.strftime("%a, %d %b %Y %H:%M:%S", time.localtime()))
 
-            rng = np.random.default_rng()
-            x_0 = x_id + rng.normal(scale=1e-3,
-                                   size=x_id.shape[0])
+            best_cost = np.inf
+            res = None
 
-            print("before optimization", f(x_0))
+            for j in range(args.optruns):
+
+                dx = rng.normal(scale=1e-3, size=x_id.shape[0])
+                for i in range(mol.n_orbitals):
+                    dx[m + 2 * i] = rng.uniform(0, np.pi)
+                    dx[m + 2 * i + 1] =  rng.uniform(0, 2 * np.pi)
+
+                print("||[H, S] psi||^2 perturbed x0", f(x_id + dx))
+
+                res_current = minimize(f, x_id + dx,
+                              method="L-BFGS-B",
+                              # method="Powell",
+                              options={"maxiter": 100})
+
+                if res_current.fun < best_cost:
+                    best_cost = res_current.fun
+                    res = res_current
+
+                print("||[H, S] psi||^2 after optimization", res_current.fun)
+                print(res_current.message)
+
+
+            print("before optimization", f(x_id))
             thetas_0, local_abcs_0 = unpack_local_abc_params(
-                x_0, mol.n_orbitals, m)
+                x_id, mol.n_orbitals, m)
             print("starting abc", local_abcs_0)
-
-            res = minimize(f, x_0,
-                           method="L-BFGS-B",
-                           options={"maxiter": 100})
-
-            print(res)
-            print("after optimization", f(res.x))
-            print(res.x)
 
             thetas_res, local_abcs_res = unpack_local_abc_params(
                 res.x, mol.n_orbitals, m)
@@ -138,12 +183,25 @@ if __name__=="__main__":
                 print(v / v[0])
             print(time.strftime("%a, %d %b %Y %H:%M:%S", time.localtime()))
 
+            variance_before = variance_restricted_local_abc(
+                gamma_a, gamma_b, gamma_ab, x_id, pairs)[0]
+
+            variance_after = variance_restricted_local_abc(
+                gamma_a, gamma_b, gamma_ab, res.x, pairs)[0]
+
+            out_row = [args.mol, bond, E_fci, variance_before, variance_after,
+                             f(x_id), f(res.x)]
+            for v in local_abcs_res:
+                out_row += [1, v[1] / v[0], v[2] / v[0]]
+
+            out_data.append(out_row)
+            optimized_parameters.append(res.x)
+
         elif args.abcmode == "locked":
             print("a, b, c are the same for all orbitals")
             print(time.strftime("%a, %d %b %Y %H:%M:%S", time.localtime()))
 
-            gamma_a, gamma_b, gamma_ab = compute_spin_rdms_from_statevector(
-                psi_full, mol.n_orbitals)
+
 
             x_id = np.zeros(m + 2)
             x_id[m] = np.arccos(-2.0 / np.sqrt(6.0))   # c = -2/sqrt(6)
@@ -157,26 +215,63 @@ if __name__=="__main__":
                 U = build_U_from_thetas(mol.n_orbitals, x_id[:m], pairs)
                 total_commutator_norm = 0
                 for i in range(mol.n_orbitals):
-                    Si_ferm = build_single_local_operator(U, mol.n_orbitals, i,
-                                                          [(a, b, c)] * mol.n_orbitals)
+                    # Si_ferm = build_single_local_operator(U, mol.n_orbitals, i,
+                    #                                       [(a, b, c)] * mol.n_orbitals)
+                    Si_ferm = normal_ordered(
+                        rotated_seniority_orbital_fermion(
+                            U, i, mol.n_orbitals, a, b, c
+                        )
+                    )
                     Si_mat = fermion_to_sparse_qubit(Si_ferm, n_qubits)
                     total_commutator_norm += expected_squared_commutator(
                         H_full, Si_mat, psi_full)
                 return total_commutator_norm
 
+
+
             rng = np.random.default_rng()
-            x_0 = x_id + rng.normal(scale=1e-3,
-                                    size=x_id.shape[0])
+            print("||[H, S] psi||^2 before optimization", f(x_id))
 
-            print("||[H, S] psi||^2 before optimization", f(x_0))
+            variance_before, _, _, _, _, _ = variance_restricted(
+                gamma_a, gamma_b, gamma_ab, x_id, pairs
+            )
+            print("Var S before optimization", variance_before)
 
-            res = minimize(f, x_0,
-                           method="L-BFGS-B",
-                           options={"maxiter": 100})
 
-            print(res.message)
-            print("||[H, S] psi||^2 after optimization", f(res.x))
-            print(res.x)
+            print()
+
+            best_cost = np.inf
+            res = None
+
+            for j in range(args.optruns):
+
+                dx = rng.normal(scale=2e-1, size=x_id.shape[0])
+                dx[-2] = rng.uniform(0, np.pi)
+                dx[-1] = rng.uniform(0, 2 * np.pi)
+
+                print("||[H, S] psi||^2 perturbed x0", f(x_id + dx))
+
+                res_current = minimize(f, x_id + dx,
+                              method="L-BFGS-B",
+                              # method="Powell",
+                              options={"maxiter": 100})
+
+                if res_current.fun < best_cost:
+                    best_cost = res_current.fun
+                    res = res_current
+
+                print("||[H, S] psi||^2 after optimization", res_current.fun)
+
+                phi1, phi2 = res_current.x[m], res_current.x[m + 1]
+
+                # Spherical parameterization for sqrt(a^2 + b^2 + c^2) = 1
+                a_opt = np.sin(phi1) * np.cos(phi2)
+                b_opt = np.sin(phi1) * np.sin(phi2)
+                c_opt = np.cos(phi1)
+
+                print("Optimal abc (rescaled):", 1, b_opt / a_opt, c_opt / a_opt)
+
+                print(res_current.message)
 
             phi1, phi2 = res.x[m], res.x[m + 1]
 
@@ -187,19 +282,17 @@ if __name__=="__main__":
 
             print("Optimal abc (rescaled):", 1, b_opt / a_opt, c_opt / a_opt)
 
-            variance_before, _, _, _, _, _ = variance_restricted(
-                gamma_a, gamma_b, gamma_ab, x_id, pairs
-            )
+
 
             variance_after, _, _, _, _, _ = variance_restricted(
                 gamma_a, gamma_b, gamma_ab, res.x, pairs
             )
 
-            print("Var S before optimization", variance_before)
+
             print("Var S after optimization", variance_after)
 
             out_data.append([args.mol, bond, E_fci, variance_before, variance_after,
-                               f(x_0), f(res.x), 1, b_opt / a_opt, c_opt / a_opt])
+                               f(x_id), f(res.x), 1, b_opt / a_opt, c_opt / a_opt])
             optimized_parameters.append(res.x)
 
             print(time.strftime("%a, %d %b %Y %H:%M:%S", time.localtime()))
