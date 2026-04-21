@@ -899,6 +899,13 @@ def build_h4_rectangle_geometry(long_side_angstrom: float, aspect_ratio: float =
         ("H", (-a, +b, 0.0)),
     ]
 
+
+def build_h2_geometry(bond_length: float):
+    return [
+        ("H", (0, 0., 0.)),
+        ("H", (bond_length, 0., 0.))
+    ]
+
 def get_geometry_and_description(molecule: str, x: float, **kwargs):
     mol = molecule.lower()
 
@@ -919,10 +926,13 @@ def get_geometry_and_description(molecule: str, x: float, **kwargs):
         aspect_ratio = kwargs.get("aspect_ratio", 1.5)
         return build_h4_rectangle_geometry(x, aspect_ratio=aspect_ratio), f"H4_rectangle_long{x:.4f}_ar{aspect_ratio:.3f}"
 
+    elif mol == "h2":
+        return build_h2_geometry(x), f"H2_bond{x:.4f}"
+
     else:
         raise ValueError(
             f"Unsupported molecule '{molecule}'. "
-            "Choose from: lih, h2o, h4_linear, h4_square, h4_rectangle"
+            "Choose from: lih, h2o, h4_linear, h4_square, h4_rectangle, h2"
         )
 
 

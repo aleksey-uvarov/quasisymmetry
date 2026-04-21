@@ -1234,7 +1234,7 @@ def evaluate_single_point(molecule: str, x: float, **kwargs):
         charge=CHARGE,
         description=description,
     )
-    mol = run_pyscf(mol, run_scf=True, run_fci=True, run_cisd=True)
+    mol = run_pyscf(mol, run_scf=True, run_fci=False, run_cisd=False)
 
     n_e = mol.n_electrons
     n_spatial = mol.n_orbitals
@@ -1472,32 +1472,24 @@ def main(
 
     mol = molecule.lower()
 
+    csv_filename = mol + "_quasi_symmetry.csv"
+
     if grid is None:
         if mol == "lih":
             grid = np.linspace(0.8, 6.0, 10)
-            if csv_filename is None:
-                csv_filename = "lih_quasi_symmetry_results.csv"
 
         elif mol == "h2o":
             grid = np.linspace(0.958, 2.5, 10)
-            if csv_filename is None:
-                csv_filename = "h2o_quasi_symmetry_results.csv"
 
         elif mol == "h4_linear":
             grid = np.linspace(0.6, 5.0, 10)
-            if csv_filename is None:
-                csv_filename = "h4_linear_quasi_symmetry_results.csv"
-
 
         elif mol == "h4_square":
             grid = np.linspace(0.6, 3.0, 10)
-            if csv_filename is None:
-                csv_filename = "h4_square_quasi_symmetry_results.csv"
 
         elif mol == "h4_rectangle":
             grid = np.linspace(0.6, 3.0, 10)
-            if csv_filename is None:
-                csv_filename = "h4_rectangle_quasi_symmetry_results.csv"
+
         else:
             raise ValueError(f"Unsupported molecule '{molecule}'")
 
@@ -1518,13 +1510,13 @@ if __name__ == "__main__":
     main(molecule="lih")
 
     # H2O
-    main(molecule="h2o", hoh_angle_deg=104.5)
-
-    # Linear H4
-    main(molecule="h4_linear")
-
-    # Square H4
-    main(molecule="h4_square")
-
-    # Rectangular H4
-    main(molecule="h4_rectangle")
+    # main(molecule="h2o", hoh_angle_deg=104.5)
+    #
+    # # Linear H4
+    # main(molecule="h4_linear")
+    #
+    # # Square H4
+    # main(molecule="h4_square")
+    #
+    # # Rectangular H4
+    # main(molecule="h4_rectangle")
