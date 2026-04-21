@@ -63,6 +63,7 @@ if __name__=="__main__":
                         default=1)
     parser.add_argument("--abcmode", default="locked")
     parser.add_argument("--optruns", type=int, default=5)
+    parser.add_argument("--fromvaroptimized", action="store_true")
 
     args = parser.parse_args()
 
@@ -91,6 +92,7 @@ if __name__=="__main__":
     for bond in bonds:
         print()
         print(args.mol, bond)
+        geometry, description = get_geometry_and_description(args.mol, bond)
         mol = get_mol(args.mol, bond)
 
         n_e = mol.n_electrons
@@ -156,6 +158,9 @@ if __name__=="__main__":
                     dx[m + 2 * i] = rng.uniform(0, np.pi)
                     dx[m + 2 * i + 1] =  rng.uniform(0, 2 * np.pi)
 
+                # if args.fromvaroptimized:
+                #     dx = dx * 0
+
                 print("||[H, S] psi||^2 perturbed x0", f(x_id + dx))
 
                 res_current = minimize(f, x_id + dx,
@@ -201,11 +206,12 @@ if __name__=="__main__":
             print("a, b, c are the same for all orbitals")
             print(time.strftime("%a, %d %b %Y %H:%M:%S", time.localtime()))
 
-
-
-            x_id = np.zeros(m + 2)
-            x_id[m] = np.arccos(-2.0 / np.sqrt(6.0))   # c = -2/sqrt(6)
-            x_id[m + 1] = np.pi / 4.0                  # a = b = 1/sqrt(6)
+            if args.fromvaroptimized:
+                x_id = np.loadtxt(description)
+            else:
+                x_id = np.zeros(m + 2)
+                x_id[m] = np.arccos(-2.0 / np.sqrt(6.0))   # c = -2/sqrt(6)
+                x_id[m + 1] = np.pi / 4.0                  # a = b = 1/sqrt(6)
 
 
             def f(x):
@@ -230,6 +236,11 @@ if __name__=="__main__":
 
 
             rng = np.random.default_rng()
+            a = np.sin(x_id[m]) * np.cos(x_id[m + 1])
+            b = np.sin(x_id[m]) * np.sin(x_id[m + 1])
+            c = np.cos(x_id[m])
+            print('abc before optimization:', 1, b/a, c/a)
+
             print("||[H, S] psi||^2 before optimization", f(x_id))
 
             variance_before, _, _, _, _, _ = variance_restricted(
@@ -248,6 +259,8 @@ if __name__=="__main__":
                 dx = rng.normal(scale=2e-1, size=x_id.shape[0])
                 dx[-2] = rng.uniform(0, np.pi)
                 dx[-1] = rng.uniform(0, 2 * np.pi)
+                if args.fromvaroptimized:
+                    dx = dx * 1e-12
 
                 print("||[H, S] psi||^2 perturbed x0", f(x_id + dx))
 
