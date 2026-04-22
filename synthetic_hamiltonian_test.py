@@ -93,7 +93,7 @@ if __name__=="__main__":
         # a = 1
         # b = 1
         # c = -1
-        U = build_U_from_thetas(n_orbitals, x_id[:m], pairs)
+        U = build_U_from_thetas(n_orbitals, x[:m], pairs)
         total_commutator_norm = 0
         for i in range(n_orbitals):
             # Si_ferm = build_single_local_operator(U, mol.n_orbitals, i,

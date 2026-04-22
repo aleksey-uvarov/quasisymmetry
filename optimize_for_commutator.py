@@ -29,6 +29,32 @@ def expected_squared_commutator(H: np.ndarray,
     return np.linalg.norm(Apsi)**2
 
 
+def commutator_cost_function_fixed_abc_(H_full, psi_full):
+    n_spin_orbitals = int(np.log2(psi_full.shape[0]))
+    n_orbitals = n_spin_orbitals // 2
+    pairs = list(combinations(range(n_orbitals), 2))
+    m = len(pairs)
+    def f(x):
+        a = np.sin(x[m]) * np.cos(x[m + 1])
+        b = np.sin(x[m]) * np.sin(x[m + 1])
+        c = np.cos(x[m])
+        U = build_U_from_thetas(n_orbitals, x[:m], pairs)
+        total_commutator_norm = 0
+        for i in range(n_orbitals):
+            Si_ferm = build_single_local_operator(U, n_orbitals, i,
+                    [(a, b, c)] * n_orbitals)
+            # Si_ferm = normal_ordered(
+            #     rotated_seniority_orbital_fermion(
+            #         U, i, n_orbitals, a, b, c
+            #     )
+            # )
+            Si_mat = fermion_to_sparse_qubit(Si_ferm, n_spin_orbitals)
+            total_commutator_norm += expected_squared_commutator(
+                H_full, Si_mat, psi_full)
+        return total_commutator_norm
+    return f
+
+
 def commutator_cost_function_fixed_abc(H_full, psi_full):
     n_spin_orbitals = int(np.log2(psi_full.shape[0]))
     n_orbitals = n_spin_orbitals // 2
@@ -38,20 +64,33 @@ def commutator_cost_function_fixed_abc(H_full, psi_full):
         a = np.sin(x[m]) * np.cos(x[m + 1])
         b = np.sin(x[m]) * np.sin(x[m + 1])
         c = np.cos(x[m])
-        U = build_U_from_thetas(n_orbitals, x_id[:m], pairs)
+        U = build_U_from_thetas(n_orbitals, x[:m], pairs)
         total_commutator_norm = 0
         for i in range(n_orbitals):
-            Si_ferm = normal_ordered(
-                rotated_seniority_orbital_fermion(
-                    U, i, n_orbitals, a, b, c
-                )
-            )
+            Si_ferm = build_single_local_operator(U, n_orbitals, i,
+                    [(a, b, c)] * n_orbitals)
+            # Si_ferm = normal_ordered(
+            #     rotated_seniority_orbital_fermion(
+            #         U, i, n_orbitals, a, b, c
+            #     )
+            # )
             Si_mat = fermion_to_sparse_qubit(Si_ferm, n_spin_orbitals)
             total_commutator_norm += expected_squared_commutator(
                 H_full, Si_mat, psi_full)
         return total_commutator_norm
     return f
 
+
+def sum_of_variances_cost_function_fixed_abc(psi_full):
+    n_spin_orbitals = int(np.log2(psi_full.shape[0]))
+    n_orbitals = n_spin_orbitals // 2
+    pairs = list(combinations(range(n_orbitals), 2))
+    gamma_a, gamma_b, gamma_ab = compute_spin_rdms_from_statevector(
+        psi_full, n_orbitals)
+    def f(x):
+        return variance_restricted(gamma_a, gamma_b, gamma_ab, x, pairs)[0]
+
+    return f
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
@@ -154,9 +193,9 @@ if __name__=="__main__":
             for j in range(args.optruns):
 
                 dx = rng.normal(scale=1e-3, size=x_id.shape[0])
-                for i in range(mol.n_orbitals):
-                    dx[m + 2 * i] = rng.uniform(0, np.pi)
-                    dx[m + 2 * i + 1] =  rng.uniform(0, 2 * np.pi)
+                # for i in range(mol.n_orbitals):
+                #     dx[m + 2 * i] = rng.uniform(0, np.pi)
+                #     dx[m + 2 * i + 1] =  rng.uniform(0, 2 * np.pi)
 
                 # if args.fromvaroptimized:
                 #     dx = dx * 0
@@ -166,7 +205,7 @@ if __name__=="__main__":
                 res_current = minimize(f, x_id + dx,
                               method="L-BFGS-B",
                               # method="Powell",
-                              options={"maxiter": 100})
+                              options={"maxiter": 3})
 
                 if res_current.fun < best_cost:
                     best_cost = res_current.fun
@@ -214,25 +253,26 @@ if __name__=="__main__":
                 x_id[m + 1] = np.pi / 4.0                  # a = b = 1/sqrt(6)
 
 
-            def f(x):
-                a = np.sin(x[m]) * np.cos(x[m + 1])
-                b = np.sin(x[m]) * np.sin(x[m + 1])
-                c = np.cos(x[m])
-                U = build_U_from_thetas(mol.n_orbitals, x_id[:m], pairs)
-                total_commutator_norm = 0
-                for i in range(mol.n_orbitals):
-                    # Si_ferm = build_single_local_operator(U, mol.n_orbitals, i,
-                    #                                       [(a, b, c)] * mol.n_orbitals)
-                    Si_ferm = normal_ordered(
-                        rotated_seniority_orbital_fermion(
-                            U, i, mol.n_orbitals, a, b, c
-                        )
-                    )
-                    Si_mat = fermion_to_sparse_qubit(Si_ferm, n_qubits)
-                    total_commutator_norm += expected_squared_commutator(
-                        H_full, Si_mat, psi_full)
-                return total_commutator_norm
+            # def f(x):
+            #     a = np.sin(x[m]) * np.cos(x[m + 1])
+            #     b = np.sin(x[m]) * np.sin(x[m + 1])
+            #     c = np.cos(x[m])
+            #     U = build_U_from_thetas(mol.n_orbitals, x[:m], pairs)
+            #     total_commutator_norm = 0
+            #     for i in range(mol.n_orbitals):
+            #         # Si_ferm = build_single_local_operator(U, mol.n_orbitals, i,
+            #         #                                       [(a, b, c)] * mol.n_orbitals)
+            #         Si_ferm = normal_ordered(
+            #             rotated_seniority_orbital_fermion(
+            #                 U, i, mol.n_orbitals, a, b, c
+            #             )
+            #         )
+            #         Si_mat = fermion_to_sparse_qubit(Si_ferm, n_qubits)
+            #         total_commutator_norm += expected_squared_commutator(
+            #             H_full, Si_mat, psi_full)
+            #     return total_commutator_norm
 
+            f = commutator_cost_function_fixed_abc(H_full, psi_full)
 
 
             rng = np.random.default_rng()
@@ -256,9 +296,9 @@ if __name__=="__main__":
 
             for j in range(args.optruns):
 
-                dx = rng.normal(scale=2e-1, size=x_id.shape[0])
-                dx[-2] = rng.uniform(0, np.pi)
-                dx[-1] = rng.uniform(0, 2 * np.pi)
+                dx = rng.normal(scale=1e-4, size=x_id.shape[0])
+                # dx[-2] = rng.uniform(0, np.pi)
+                # dx[-1] = rng.uniform(0, 2 * np.pi)
                 if args.fromvaroptimized:
                     dx = dx * 1e-12
 
@@ -267,7 +307,7 @@ if __name__=="__main__":
                 res_current = minimize(f, x_id + dx,
                               method="L-BFGS-B",
                               # method="Powell",
-                              options={"maxiter": 100})
+                              options={"maxiter": 2})
 
                 if res_current.fun < best_cost:
                     best_cost = res_current.fun
