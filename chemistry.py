@@ -1,14 +1,22 @@
 import numpy as np
-from openfermion import MolecularData
+import openfermion as of
 from openfermionpyscf import run_pyscf
+from dataclasses import dataclass
 
 # from optimization_different_abc import givens
+
+@dataclass
+class FakeMolecularData:
+    n_electrons: int
+    n_orbitals: int
+    hamiltonian: of.InteractionOperator
+
 
 
 def get_mol(molname, bond):
     geometry, description = get_geometry_and_description(molname, bond)
 
-    mol = MolecularData(
+    mol = of.MolecularData(
         geometry=geometry,
         basis="sto-3g",
         multiplicity=1,
@@ -36,6 +44,14 @@ def givens(n, p, q, theta):
     G[p, q] = s
     G[q, p] = -s
     return G
+
+
+def get_model_hamiltonian():
+    h = of.FermionOperator(((0, 1), (0, 0)), 1)
+    h += of.FermionOperator(((1, 1), (1, 0)), 1)
+
+    return FakeMolecularData(2, 2, of.get_interaction_operator(h, 4))
+
 
 # ============================================================
 # Geometry builders

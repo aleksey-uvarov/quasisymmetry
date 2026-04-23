@@ -134,6 +134,7 @@ if __name__=="__main__":
     parser.add_argument("--abcmode", default="locked")
     parser.add_argument("--optruns", type=int, default=1)
     parser.add_argument("--fromvaroptimized", action="store_true")
+    parser.add_argument("--noise_power", type=int, default=-4)
 
     args = parser.parse_args()
 
@@ -193,7 +194,7 @@ if __name__=="__main__":
     x_id = np.zeros(m + 2)
     x_id[m] = np.arccos(-2.0 / np.sqrt(6.0))   # c = -2/sqrt(6)
     x_id[m + 1] = np.pi / 4.0                  # a = b = 1/sqrt(6)
-    dx = rng.normal(scale=1e-4, size=x_id.shape[0])
+    dx = rng.normal(scale=10**(args.noise_power), size=x_id.shape[0])
 
 
 
