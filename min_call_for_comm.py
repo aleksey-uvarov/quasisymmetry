@@ -7,8 +7,9 @@ import scipy.sparse.linalg as spla
 import time
 
 
-from optimize_for_commutator import get_mol, commutator_cost_function_fixed_abc
-from optimization_different_abc import build_U_from_thetas, popcount
+from optimize_for_commutator import commutator_cost_function_fixed_abc
+from chemistry import get_mol, build_U_from_thetas
+from optimization_different_abc import popcount
 import numpy as np
 
 import openfermion as of
