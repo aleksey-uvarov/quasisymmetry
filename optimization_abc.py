@@ -1286,7 +1286,7 @@ def evaluate_single_point(molecule: str, x: float, **kwargs):
         gamma_a, gamma_b, Gamma_ab, res.x, best["pairs"]
     )
 
-    np.savetxt(description, res.x)
+    np.savetxt(description + "_var_opt.txt", res.x)
 
     # State-specific commutativity on FCI state
     # use sum_i ||[H,S_i] psi||^2 and analyze leakage per S_i
@@ -1512,10 +1512,10 @@ if __name__ == "__main__":
     # main(molecule="lih")
 
     # H2O
-    main(molecule="h2o", hoh_angle_deg=104.5)
+    # main(molecule="h2o", hoh_angle_deg=104.5, grid=[3.044])
     #
     # # Linear H4
-    # main(molecule="h4_linear")
+    main(molecule="h4_linear", grid=[2.067])
     #
     # # Square H4
     # main(molecule="h4_square")
