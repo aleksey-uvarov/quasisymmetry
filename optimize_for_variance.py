@@ -96,6 +96,7 @@ def sum_of_variances_cost_function_fixed_abc(psi_full):
     def f(x):
         return variance_restricted(gamma_a, gamma_b, gamma_ab, x, pairs)[0]
 
+
     return f
 
 
@@ -109,13 +110,18 @@ if __name__=="__main__":
     parser.add_argument("mol",
         help="one of the following: lih, h2o, h4_linear, h4_square, h4_rectangle, h2")
     parser.add_argument("bond", type=float, help="bond")
-    # parser.add_argument("--optruns", type=int, default=1)
     parser.add_argument("initialguesses",
                         help="path to file with initial guesses (one line = one point)")
-    # parser.add_argument("--noise_power", type=int, default=-4)
 
     args = parser.parse_args()
     mol = get_mol(args.mol, args.bond)
+    # mol.filename = "/home/alexey/codes/2026/quasisymmetry/h4_test.hdf5"
+    # mol.save()
+    ### why the fuck does openfermion save stuff somewhere up its own ass?
+    # fname = "/home/alexey/quantchem/lib/python3.12/site-packages/openfermion/testing/data/H4_sto-3g_singlet_H4_linear_d2.0670"
+    # mol = of.load_molecular_hamiltonian()
+
+    # mol = of.MolecularData(filename="/home/alexey/codes/2026/quasisymmetry/h4_test.hdf5.hdf5")
 
     print("a, b, c are the same for all orbitals")
     print(time.strftime("%a, %d %b %Y %H:%M:%S", time.localtime()))
@@ -130,7 +136,7 @@ if __name__=="__main__":
     basis_idx = np.array(basis_bitstrings, dtype=int)
 
     H_sub = H_full[basis_idx, :][:, basis_idx].tocsc()
-    evals, evecs = spla.eigsh(H_sub, k=1, which="SA")
+    evals, evecs = spla.eigsh(H_sub, k=6, which="SA")
     E_fci = float(np.real(evals[0]))
     v_sub = evecs[:, 0]
 
@@ -146,6 +152,10 @@ if __name__=="__main__":
     _, psi_fci_number = spla.eigsh(H_number, which="SA", k=1)
 
     f = sum_of_variances_cost_function_fixed_abc(psi_full)
+
+    foo_0 = f(np.loadtxt(args.initialguesses)[0, :])
+
+    orbitals_det = np.linalg.det(mol.canonical_orbitals)
 
     g, m = commutator_cost_number_pres(H_number,
                                        psi_fci_number,
@@ -168,13 +178,14 @@ if __name__=="__main__":
     for i in range(n_points):
         x_0 = initial_guesses[i, :]
         print("x0", x_0)
+        variance_before = f(x_0)
         res = minimize(f, x_0,
                        method="L-BFGS-B",
                        options={"maxiter": 100},
                        callback=callback)
         print(res.message)
 
-        variance_before = f(x_0)
+
         variance_after = res.fun
 
         phi1, phi2 = res.x[m], res.x[m + 1]

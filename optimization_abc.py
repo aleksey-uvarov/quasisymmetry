@@ -37,9 +37,9 @@ BASIS = "sto-3g"
 
 ####
 OPT_METHOD = "L-BFGS-B" #web says powell good
-MAXITER = 100
-N_RESTARTS = 2
-ANGLE_INIT_SCALE = 1e-2
+MAXITER = 200
+N_RESTARTS = 5
+ANGLE_INIT_SCALE = 0.2
 RANDOM_SEED = 0
 TOPK_ANGLES_TO_PRINT = 10
 
@@ -1515,7 +1515,7 @@ if __name__ == "__main__":
     # main(molecule="h2o", hoh_angle_deg=104.5, grid=[3.044])
     #
     # # Linear H4
-    main(molecule="h4_linear", grid=[2.067])
+    main(molecule="h4_linear")
     #
     # # Square H4
     # main(molecule="h4_square")
