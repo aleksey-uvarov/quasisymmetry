@@ -32,6 +32,12 @@ if __name__=="__main__":
         for i in range(args.npoints):
             xs[i, :m] = rng.normal(scale=10**(args.noise_scale), size=m)
             xs[i, m:] = SENIORITY_ANGLES
+    elif args.mode == "perturb_all":
+        for i in range(args.npoints):
+            xs[i, m:] = SENIORITY_ANGLES
+            xs[i, :] += rng.normal(scale=10**(args.noise_scale), size=m + 2)
+    else:
+        raise ValueError("--mode can be 'perturb_U' or 'perturb_all'")
 
     np.savetxt("x0_" + args.mol + "_" + str(args.bond)
                + "_" + args.mode + "_" + str(args.noise_scale) + ".txt", xs)
