@@ -114,13 +114,6 @@ if __name__=="__main__":
     parser.add_argument("--verbose", action="store_true")
 
     args = parser.parse_args()
-    # mol = get_mol(args.mol, args.bond)
-    # mol.filename = "/home/alexey/codes/2026/quasisymmetry/h4_test.hdf5"
-    # mol.save()
-    ### why the fuck does openfermion save stuff somewhere up its own ass?
-    # fname = "/home/alexey/quantchem/lib/python3.12/site-packages/openfermion/testing/data/H4_sto-3g_singlet_H4_linear_d2.0670"
-    # mol = of.load_molecular_hamiltonian()
-    # mol = of.MolecularData(filename="/home/alexey/codes/2026/quasisymmetry/h4_test.hdf5.hdf5")
 
     mol = of.MolecularData(filename=args.molpath)
 
@@ -141,7 +134,6 @@ if __name__=="__main__":
     E_fci = float(np.real(evals[0]))
     v_sub = evecs[:, 0]
 
-    # Full-space FCI state
     psi_full = np.zeros(2**(2 * mol.n_orbitals), dtype=np.complex128)
     psi_full[basis_idx] = v_sub
     psi_full /= np.linalg.norm(psi_full)
