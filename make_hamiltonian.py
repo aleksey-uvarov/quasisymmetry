@@ -2,6 +2,7 @@ import numpy as np
 import argparse
 import openfermion as of
 from openfermionpyscf import run_pyscf
+from pathlib import Path
 
 from chemistry import  get_geometry_and_description
 
@@ -16,15 +17,16 @@ if __name__=="__main__":
 
     geometry, description = get_geometry_and_description(args.mol, args.bond)
 
+    path = Path("hamiltonians")
+    abspath = str(path.absolute())
+
     mol = of.MolecularData(
         geometry=geometry,
         basis=args.basis,
         multiplicity=1,
         charge=0,
-        description=description
+        description=description,
+        data_directory=abspath
     )
     mol = run_pyscf(mol, run_scf=True, run_fci=False, run_cisd=False)
-
-    mol.filename = "./hamiltonians/" + description
-
     mol.save()
