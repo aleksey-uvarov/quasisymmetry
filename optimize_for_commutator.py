@@ -156,7 +156,7 @@ if __name__=="__main__":
      "Sum_CommSq_0", "Sum_CommSq_Optimized", "a_opt", "b_opt", "c_opt"]
 
     with open(mol.description + "_"
-                  + args.initialguesses + "_opt_data.txt",
+                  + args.initialguesses + "_comm_opt_data.txt",
               "a", newline="") as fp:
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
         writer.writeheader()
