@@ -50,3 +50,37 @@ def duplicate_each_element(x: np.ndarray) -> np.ndarray:
     y[:, 0] = x
     y[:, 1] = x
     return y.flatten()
+
+def commutator_cost_number_pres(H, psi, num_electrons, n_orbitals):
+    """THIS COULD STILL BE FASTER"""
+    pairs = list(combinations(range(n_orbitals), 2))
+    m = len(pairs)
+
+    def f(x):
+        a = np.sin(x[m]) * np.cos(x[m + 1])
+        b = np.sin(x[m]) * np.sin(x[m + 1])
+        c = np.cos(x[m])
+        U = build_U_from_thetas(n_orbitals, x[:m], pairs)
+        symmetries = [(of.FermionOperator(((2 * i, 1), (2 * i, 0)), a)
+                       + of.FermionOperator(((2 * i + 1, 1), (2 * i + 1, 0)), b)
+                       + (of.FermionOperator(((2 * i, 1), (2 * i, 0)), c)
+                       * of.FermionOperator(((2 * i + 1, 1), (2 * i + 1, 0)), 1)))
+                      for i in range(n_orbitals)]
+
+        symmetry_inter_ops = [of.get_interaction_operator(s, n_qubits=2 * n_orbitals)
+                              for s in symmetries]
+
+        total = 0
+        for op in symmetry_inter_ops:
+            op.rotate_basis(U.T.conj())
+            op = of.get_fermion_operator(op)
+            op_mat = of.get_number_preserving_sparse_operator(
+                op, num_qubits=2 * n_orbitals,
+                num_electrons=num_electrons)
+            # print(op_mat.shape)
+            # print(H.shape)
+            comm = H @ op_mat - op_mat @ H
+            total += np.linalg.norm(comm @ psi)**2
+        return total
+
+    return f, m
