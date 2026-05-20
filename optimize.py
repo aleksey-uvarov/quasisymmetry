@@ -113,6 +113,15 @@ def make_quasiymmetries(x, norb, nelec):
     linops = [ffsim.linear_operator(op, norb, nelec) for op in ops]
     return linops
 
+
+def x_to_rotation(x, norb):
+    iu = np.triu_indices(norb, k=1)
+    rotation_generator = np.zeros((norb, norb))
+    rotation_generator[iu] = x
+    rotation_generator -= rotation_generator.T
+    return scipy.linalg.expm(rotation_generator)
+
+
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("molpath",
