@@ -188,7 +188,7 @@ if __name__=="__main__":
             print("x0", x_0)
             res = scipy.optimize.minimize(f, x_0,
                                           method="L-BFGS-B",
-                                          options={"maxiter": 100},
+                                          options={"maxiter": 1000},
                                           callback=callback if args.verbose else None)
 
 
