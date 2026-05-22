@@ -3,10 +3,14 @@ import pyscf
 import ffsim
 import numpy as np
 import scipy
+import json
 
 from itertools import product
 
 from optimize import commutator_cost, variance_cost, x_to_rotation
+
+
+SECTOR_LABELS = ("_", "^", "v", "*")
 
 
 def sector_partitioning_metrics(moldata: ffsim.MolecularData,
@@ -16,12 +20,7 @@ def sector_partitioning_metrics(moldata: ffsim.MolecularData,
     according to quasisymmetries specified by U, a, b, c,
     and return the following numbers:
 
-    e_dec: lowest single-sector energy
-    e_bo: energy of a subspace constructed by taking the lowest eigenvector
-          from each subspace ('Born-Oppenheimer energy')
-    K_en: the number of sector eigenstates needed to reach the FCI energy up to target_accuracy,
-        if the eignestates are ordered according to their energies
-    K_overlap: same, but the states are ordered according to their overlap with FCI
+
     """
 
     rotated_h = moldata.hamiltonian.rotated(U)
@@ -29,13 +28,21 @@ def sector_partitioning_metrics(moldata: ffsim.MolecularData,
                                             norb=moldata.norb,
                                             nelec=moldata.nelec)
     e_0, v_0 = scipy.sparse.linalg.eigsh(rotated_h_linop, which="SA", k=1)
+
+    sectors = distinct_generalized_seniority_sectors(a, b, c)
+    labeled_sectors = [[SECTOR_LABELS[m] for m in s]
+        for s in sectors]
+    print(labeled_sectors)
+
     all_projector_sets = [generalized_seniority_projectors(i, a, b, c) for i in range(moldata.norb)]
     lens = [len(p) for p in all_projector_sets]
     iterators = [range(q) for q in lens]
     projected_eigenvectors = []
     relevant_sector_indices = []
 
-    for i, w in enumerate(product(*iterators)):
+    all_sectors = list(product(*iterators))
+
+    for i, w in enumerate(all_sectors):
         total_projector = ffsim.FermionOperator({(): 1})
         for orbital in range(moldata.norb):
             total_projector *= all_projector_sets[orbital][w[orbital]]
@@ -55,9 +62,6 @@ def sector_partitioning_metrics(moldata: ffsim.MolecularData,
         for j in range(dimension):
             sector_vs_big[support, j] = sector_vs_small[:, j]
 
-        # projected_h = total_projector_linop @ rotated_h_linop @ total_projector_linop
-        # sector_es, sector_vs = scipy.sparse.linalg.eigsh(projected_h, k=dimension, which="SA")
-        # nonzero_eig_indices = np.where(sector_es < -1e-6)[0]
         projected_eigenvectors.append((sector_es, sector_vs_big))
         relevant_sector_indices.append(i)
 
@@ -69,10 +73,12 @@ def sector_partitioning_metrics(moldata: ffsim.MolecularData,
 
     lowest_eigenvectors_pooled = np.concatenate([s[1] for s in projected_eigenvectors], axis=1)
     energies_pooled = np.concatenate([s[0] for s in projected_eigenvectors])
-    # origins = []
-    # for i, s in enumerate(projected_eigenvectors):
-    #     origins.extend([i] * s[0].shape[0])
-    # origins = np.array(origins, dtype=int)
+
+    origins = []
+    for i, s in enumerate(projected_eigenvectors):
+        origins.extend([relevant_sector_indices[i]] * s[0].shape[0])
+    origins = np.array(origins, dtype=int)
+
     overlaps_with_fci = (abs(lowest_eigenvectors_pooled.T.conj() @ v_0) ** 2).flatten()
     e_dec = np.min(energies_pooled)
 
@@ -108,8 +114,28 @@ def sector_partitioning_metrics(moldata: ffsim.MolecularData,
     else:
         raise AssertionError("This should never happen, go take a look")
 
+    energies = {"FCI": e_0[0], "Born-Oppenheimer": e_bo, "Decoupled": e_dec}
 
-    return e_dec, e_bo, k_en, k_overlap
+    important_sector_indices_overlap = np.unique(origins[overlap_order_of_vectors[:k_overlap]])
+    important_sector_indices_energy = np.unique(origins[energy_order_of_vectors[:k_en]])
+
+    important_sectors_overlap = [all_sectors[j] for j in important_sector_indices_overlap]
+    print(important_sectors_overlap)
+
+    important_sectors_energy = [all_sectors[j] for j in important_sector_indices_energy]
+    print(important_sectors_energy)
+
+    n_sectors_used_energy = important_sector_indices_energy.shape[0]
+    n_sectors_used_overlap = important_sector_indices_overlap.shape[0]
+    n_sectors_total = len(relevant_sector_indices)
+
+    sector_and_state_data = {"K_en": k_en, "K_overlap": k_overlap, "sectors_overlap": n_sectors_used_overlap,
+                             "sectors_en": n_sectors_used_energy, "sectors_total": n_sectors_total,
+                             "important_sectors_overlap": important_sectors_overlap,
+                             "important_sectors_energy": important_sectors_energy,
+                             "sector_types": labeled_sectors}
+
+    return energies, sector_and_state_data
 
 
 def subspace_matrix(A, support):
@@ -203,7 +229,8 @@ if __name__=="__main__":
     n_points = xs.shape[0]
 
     data_filename = args.xs + "_metrics.txt"
-    fieldnames = ["V_fci", "V_hf", "C_fci", "C_hf", "b", "c", "E_dec", "E_bo", "K_en", "K_overlap"]
+    fieldnames = ["V_fci", "V_hf", "C_fci", "C_hf", "b", "c",
+                  "E_dec-E_fci", "E_bo-E_fci", "K_en", "K_overlap", "Sectors_en", "Sectors_overlap"]
     print(" ".join(fieldnames) + "\n")
 
     with open(data_filename,
@@ -216,16 +243,29 @@ if __name__=="__main__":
         a_opt = np.sin(phi1) * np.cos(phi2)
         b_opt = np.sin(phi1) * np.sin(phi2)
         c_opt = np.cos(phi1)
-        print(a_opt, b_opt, c_opt)
+        # print(a_opt, b_opt, c_opt)
 
         U = x_to_rotation(x[:-2], moldata.norb)
 
-        e_dec, e_bo, k_en, k_overlap = sector_partitioning_metrics(moldata, U, a_opt, b_opt, c_opt)
+        energies, sectors_data = sector_partitioning_metrics(moldata, U, a_opt, b_opt, c_opt)
 
+        print(energies)
+
+        print(sectors_data)
+        #
         costs_and_bc = np.array([variance_fci(x), variance_hf(x),
                                  commutator_fci(x), commutator_hf(x),
-                                 b_opt / a_opt, c_opt / a_opt, e_dec, e_bo, k_en, k_overlap]).real
+                                 b_opt / a_opt, c_opt / a_opt,
+                                 energies["Decoupled"] - energies["FCI"],
+                                 energies["Born-Oppenheimer"] - energies["FCI"],
+                                 sectors_data["K_en"], sectors_data["K_overlap"],
+                                 sectors_data["sectors_en"], sectors_data["sectors_overlap"]]).real
         print(costs_and_bc)
 
         with open(data_filename, "ab") as fp:
             np.savetxt(fp, costs_and_bc.reshape(1, costs_and_bc.shape[0]))
+
+        with open(args.xs + "_more_sector_data.txt", "a", encoding="utf-8") as fp:
+            s = json.dumps(sectors_data)
+            # print(s)
+            fp.write(s + "\n")
