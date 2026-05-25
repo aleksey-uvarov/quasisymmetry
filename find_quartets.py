@@ -37,13 +37,17 @@ def make_quartets(norb: int, nelec):
         s = s_alpha * s_beta
         local_parities.append(ffsim.linear_operator(s, norb, nelec))
     for i in range(norb):
-        for j in range(i + 1, norb):
-            quartets[(i, j)] = local_parities[i] @ local_parities[j]
+        for j in range(i, norb):
+            if i == j:
+                quartets[(i, j)] = local_parities[i]
+            else:
+                quartets[(i, j)] = local_parities[i] @ local_parities[j]
     return quartets
 
 
 def quartet_commutators(moldata: ffsim.MolecularData, state, U):
-    """Return a weighted graph with edge weights being the commmutator norms"""
+    """Return a weighted graph with edge weights being the commmutator norms.
+    Self-edges denote single-site parity commutators"""
     G = nx.complete_graph(moldata.norb)
     quartets = make_quartets(moldata.norb, moldata.nelec)
 
@@ -52,10 +56,13 @@ def quartet_commutators(moldata: ffsim.MolecularData, state, U):
     rotated_state = ffsim.apply_orbital_rotation(state, U, moldata.norb, moldata.nelec)
 
     for i in range(moldata.norb):
-        for j in range(i + 1, moldata.norb):
+        for j in range(i, moldata.norb):
             commutator = rotated_h @ quartets[(i, j)] - quartets[(i, j)] @ rotated_h
             state_after_commutator = commutator @ rotated_state
-            G[i][j]['weight'] = np.linalg.norm(state_after_commutator)**2
+            if i != j:
+                G[i][j]['weight'] = np.linalg.norm(state_after_commutator)**2
+            else:
+                G.add_edge(i, i, weight=np.linalg.norm(state_after_commutator)**2)
 
     return G
 
@@ -80,7 +87,6 @@ if __name__=="__main__":
     mf.update_from_chk(args.molpath)
 
     moldata = ffsim.MolecularData.from_scf(mf)
-    print("done")
 
     xs_filename = (time.strftime("%Y%m%d_%H%M%S", time.localtime())
                    + "_quartet_opt.txt")
@@ -92,13 +98,21 @@ if __name__=="__main__":
     print("creating h linop")
     h =  ffsim.linear_operator(moldata.hamiltonian,
                                       norb=moldata.norb, nelec=moldata.nelec)
-    print("finding fci")
-    fci_energy, fci_state = scipy.sparse.linalg.eigsh(h, k=1, which="SA")
-    fci_energy = fci_energy[0]
-    fci_state = fci_state[:, 0]
+
+    if args.reference == "fci":
+        print("finding fci")
+        fci_energy, fci_state = scipy.sparse.linalg.eigsh(h, k=1, which="SA")
+        fci_energy = fci_energy[0]
+        state = fci_state[:, 0]
+
+    elif args.reference == "hf":
+        state = ffsim.hartree_fock_state(moldata.norb, moldata.nelec)
+    else:
+        raise ValueError("--reference can be 'hf' or 'fci'")
+
     print("finding commutators")
     G = quartet_commutators(moldata,
-                            fci_state,
+                            state,
                             np.eye(moldata.norb))
 
     print(G)
@@ -108,18 +122,27 @@ if __name__=="__main__":
     plt.figure()
     plt.imshow(mf.mo_coeff, cmap="PuOr", vmin=-1, vmax=1)
     plt.yticks(range(mol.nao), mol.ao_labels())
+    plt.xticks(range(mol.nao), range(mol.nao))
     plt.title("Canonical orbitals \n" + args.molpath)
     plt.colorbar()
     plt.savefig("canonical_orbitals.png", dpi=600, bbox_inches="tight", format="png")
-    # plt.show()
 
-    adj = nx.to_numpy_array(G)
+    adj = np.triu(nx.to_numpy_array(G), 0)
     plt.figure()
     plt.imshow(adj, norm=LogNorm(vmin=1e-4, vmax=1))
     plt.colorbar()
-    plt.title("Quartet noncommutativity norm $||[H, s_{pq}]|FCI\\rangle||^2$ \n" + args.molpath)
-    plt.savefig("quartets.png", dpi=600, bbox_inches="tight", format="png")
-    plt.show()
+    plt.xticks(range(mol.nao), range(mol.nao))
+    plt.yticks(range(mol.nao), range(mol.nao))
+    if args.reference == "fci":
+        plt.title("Quartet noncommutativity norm $||[H, s_{pq}]|FCI\\rangle||^2$ \n" + args.molpath
+                  + "\n Diagonal entries are $||[H, s_{p}]|FCI\\rangle||^2$")
 
+        plt.savefig("quartets.png", dpi=600, bbox_inches="tight", format="png")
+    elif args.reference == "hf":
+        plt.title("Quartet noncommutativity norm $||[H, s_{pq}]|HF\\rangle||^2$ \n" + args.molpath
+                  + "\n Diagonal entries are $||[H, s_{p}]|HF\\rangle||^2$")
+
+        plt.savefig("quartets_hf.png", dpi=600, bbox_inches="tight", format="png")
+    plt.show()
 
 
