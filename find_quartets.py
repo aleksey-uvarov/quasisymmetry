@@ -166,9 +166,12 @@ if __name__=="__main__":
 
     if args.reference == "fci":
         print("finding fci")
-        fci_energy, fci_state = scipy.sparse.linalg.eigsh(h, k=1, which="SA")
-        fci_energy = fci_energy[0]
-        state = fci_state[:, 0]
+        # fci_energy, fci_state = scipy.sparse.linalg.eigsh(h, k=1, which="SA")
+        # fci_energy = fci_energy[0]
+        # state = fci_state[:, 0]
+        cisolver = pyscf.fci.FCI(mf)
+        cisolver.kernel()
+        state = np.array(cisolver.ci.reshape((-1,)), dtype="complex")
     elif args.reference == "hf":
         state = ffsim.hartree_fock_state(moldata.norb, moldata.nelec)
     else:
