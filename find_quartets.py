@@ -7,19 +7,18 @@ import time
 import ffsim
 import scipy
 import pyscf
-import sys
 import networkx as nx
 import matplotlib.pyplot as plt
 import jax
 
-
-from typing import Tuple, Callable
-from itertools import combinations
 from functools import cache
 from matplotlib.colors import LogNorm
 from math import comb
 
+from tqdm import tqdm
+
 from optimize import x_to_rotation
+from xs_to_metrics import subspace_matrix
 
 @cache
 def make_quartets(norb: int, nelec):
@@ -133,6 +132,138 @@ def nc_cost(moldata, state, quartet_graph):
     return f
 
 
+def quartet_sectors(quartets, norb, nelec):
+    dim = comb(norb, nelec[0]) * comb(norb, nelec[1])
+    bitstrings = ffsim.addresses_to_strings(range(dim), norb, nelec,
+                                            bitstring_type=ffsim.BitstringType.INT, concatenate=False)
+
+    quartet_bit_masks = []
+    for q in quartets:
+        quartet_bit_masks.append(2 ** q[0] + 2 ** q[1])
+
+    sectors = {}
+    for i in range(state.shape[0]):
+        ab_parities = bitstrings[0][i] ^ bitstrings[1][i]
+        sector_label = tuple(
+            (int.bit_count(int(ab_parities & q)) % 2 for q in quartet_bit_masks)
+        )
+        sectors.setdefault(sector_label, []).append(i)
+
+    return sectors
+
+
+def sector_metrics(moldata, state, U,
+                   sectors,
+                   target_energy,
+                   max_states_per_sector=100):
+    print("sector dimensions:")
+    print({k: len(v) for k, v in sectors.items()})
+
+
+    rotated_h_linop = ffsim.linear_operator(moldata.hamiltonian.rotated(U),
+                                            norb=moldata.norb, nelec=moldata.nelec)
+    rotated_state = ffsim.apply_orbital_rotation(state, U,
+                                                 moldata.norb, moldata.nelec)
+
+    sector_hamiltonians = {k: subspace_matrix(rotated_h_linop, v)
+                           for k, v in sectors.items()}
+
+    sector_eigen_decompositions = {}
+    for sector_label, h_local in sector_hamiltonians.items():
+        if h_local.shape[0] <= max_states_per_sector:
+            sector_eigen_decompositions[sector_label] = np.linalg.eigh(h_local)
+        else:
+            sector_eigen_decompositions[sector_label] = scipy.sparse.linalg.eigsh(
+                h_local, which="SA", k=max_states_per_sector)
+
+    pooled_energies = {}
+    for sector_label in sectors.keys():
+        for i in range(len(sector_eigen_decompositions[sector_label][0])):
+            pooled_energies[(sector_label, i)] = (
+                sector_eigen_decompositions[sector_label][0][i]
+            )
+
+    vector_labels = list(pooled_energies.keys())
+    energy_order = np.argsort(list(pooled_energies.values()))
+
+    # pulling vectors by their local energies
+    current_state_vectors = np.array(())
+    for i in tqdm(range(len(energy_order))):
+        sector_label = vector_labels[energy_order[i]][0]
+        vector_id_in_sector = vector_labels[energy_order[i]][1]
+        next_vector = sector_eigen_decompositions[sector_label][1][:, vector_id_in_sector]
+        next_vector_big = np.zeros(rotated_h_linop.shape[0], dtype="complex")
+        next_vector_big[sectors[sector_label]] = next_vector
+
+        if i == 0:
+            current_state_vectors = next_vector_big
+        else:
+            current_state_vectors = np.vstack([current_state_vectors, next_vector_big])
+
+        h_subspace = current_state_vectors.conj() @ rotated_h_linop @ current_state_vectors.T
+
+        if i == 0:
+            subspace_energy = h_subspace.real
+        elif i == 1:
+            w, v = np.linalg.eigh(h_subspace)
+            subspace_energy = w[0]
+        else:
+            subspace_energy = scipy.sparse.linalg.eigsh(h_subspace, k=1, which="SA")[0][0]
+
+
+        if subspace_energy < target_energy:
+            print("K_en = {0:}".format(i + 1))
+            K_en =  i + 1
+            break
+    else:
+        K_en = np.nan
+        print("Chemical accuracy not reached, try more vectors per sector")
+
+    pooled_overlaps = {}
+    for sector_label in sectors.keys():
+        for i in range(len(sector_eigen_decompositions[sector_label][0])):
+            vector_id_in_sector = vector_labels[energy_order[i]][1]
+            vector = sector_eigen_decompositions[sector_label][1][:, vector_id_in_sector]
+            projected_reference = state[sectors[sector_label]]
+            pooled_overlaps[(sector_label, i)] = abs(vector.T.conj() @ projected_reference)**2
+
+    overlap_order = np.argsort(list(pooled_overlaps.values()))
+
+    # pulling vectors by their local energies
+    current_state_vectors = np.array(())
+    for i in tqdm(range(len(overlap_order))):
+        sector_label = vector_labels[energy_order[i]][0]
+        vector_id_in_sector = vector_labels[energy_order[i]][1]
+        next_vector = sector_eigen_decompositions[sector_label][1][:, vector_id_in_sector]
+        next_vector_big = np.zeros(rotated_h_linop.shape[0], dtype="complex")
+        next_vector_big[sectors[sector_label]] = next_vector
+
+        if i == 0:
+            current_state_vectors = next_vector_big
+        else:
+            current_state_vectors = np.vstack([current_state_vectors, next_vector_big])
+
+        h_subspace = current_state_vectors.conj() @ rotated_h_linop @ current_state_vectors.T
+
+        if i == 0:
+            subspace_energy = h_subspace.real
+        elif i == 1:
+            w, v = np.linalg.eigh(h_subspace)
+            subspace_energy = w[0]
+        else:
+            subspace_energy = scipy.sparse.linalg.eigsh(h_subspace, k=1, which="SA")[0][0]
+
+
+        if subspace_energy < target_energy:
+            print("K_overlap = {0:}".format(i + 1))
+            K_overlap =  i + 1
+            break
+    else:
+        K_overlap = np.nan
+        print("Chemical accuracy not reached, try more vectors per sector")
+
+
+
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Optimize orbitals and/or graph structure "
                                                  "to find two-orbital quasisymmetries ('quartets')",
@@ -160,18 +291,12 @@ if __name__=="__main__":
     mf.update_from_chk(args.molpath)
     moldata = ffsim.MolecularData.from_scf(mf)
 
-    print("creating h linop")
-    h = ffsim.linear_operator(moldata.hamiltonian,
-                                      norb=moldata.norb, nelec=moldata.nelec)
+    print("finding fci") # we need it for energy metrics anyway
+    cisolver = pyscf.fci.FCI(mf)
+    cisolver.kernel()
 
     if args.reference == "fci":
-        print("finding fci")
-        # fci_energy, fci_state = scipy.sparse.linalg.eigsh(h, k=1, which="SA")
-        # fci_energy = fci_energy[0]
-        # state = fci_state[:, 0]
-        cisolver = pyscf.fci.FCI(mf)
-        cisolver.kernel()
-        state = np.array(cisolver.ci.reshape((-1,)), dtype="complex")
+        state = np.array(cisolver.ci.reshape((-1,)), dtype="complex") # ffsim will complain without dtype='complex'
     elif args.reference == "hf":
         state = ffsim.hartree_fock_state(moldata.norb, moldata.nelec)
     else:
@@ -191,16 +316,13 @@ if __name__=="__main__":
     print(list(quartet_graph.edges()))
 
     if args.optimization_mode is None or args.optimization_mode == "None":
+        print("No orbital optimization")
         U = np.eye(moldata.norb)
     elif args.optimization_mode == "OO":
         print("Optimizing orbitals keeping the quartet graph fixed")
         f = nc_cost(moldata, state, quartet_graph)
         x0 = np.zeros(comb(moldata.norb, 2))
         print("NC cost, Canonical orbitals", f(x0))
-
-        # x0 = np.random.randn(comb(moldata.norb, 2)) * 0.1
-        # print("NC cost, random initial guess", f(x0))
-
         res = scipy.optimize.minimize(f, x0, method="L-BFGS-B", options={"maxiter": 100})
         print(res)
         U = x_to_rotation(res.x, moldata.norb)
@@ -209,10 +331,24 @@ if __name__=="__main__":
 
     optimized_quartets = all_quartet_commutators(moldata, state, U)
     opt_quartets_matrix = np.triu(nx.adjacency_matrix(optimized_quartets).todense(), 1)
-    iu = np.triu_indices(moldata.norb, 1)
     opt_quartets_sorted = np.sort(opt_quartets_matrix[iu])
     sum_of_lowest_opt_quartets = np.sum(opt_quartets_sorted[:moldata.norb])
     print("Sum of lowest m quartets (optimized orbitals)", sum_of_lowest_opt_quartets)
+
+    # with optimized quartets we can partition the function
+
+    best_quartet_indices = np.argsort(opt_quartets_matrix[iu])[:moldata.norb - 1]
+    best_quartets = [(iu[0][i], iu[1][i]) for i in best_quartet_indices]
+    print("m-1 lowest NC factor quartets")
+    print(best_quartets)
+
+    print("creating sectors")
+    sectors = quartet_sectors(best_quartets, moldata.norb, moldata.nelec)
+
+    sector_metrics(moldata, state, U, sectors,
+                   target_energy=cisolver.e_tot + 0.0016)
+
+
 
 
 

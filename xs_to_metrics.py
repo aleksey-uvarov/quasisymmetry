@@ -148,7 +148,8 @@ def sector_partitioning_metrics(moldata: ffsim.MolecularData,
 
 
 def subspace_matrix(A, support):
-    dim = support.shape[0]
+    # dim = support.shape[0]
+    dim = len(support)
 
     A_sub = np.zeros((dim, dim), dtype="complex")
 
