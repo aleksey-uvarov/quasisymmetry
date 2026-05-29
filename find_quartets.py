@@ -2,6 +2,8 @@
 where s_pq is a parity of population of orbitals p, q"""
 
 import argparse
+import json
+
 import numpy as np
 import time
 import ffsim
@@ -10,12 +12,13 @@ import pyscf
 import networkx as nx
 import matplotlib.pyplot as plt
 import jax
+import uuid
 
 from functools import cache
 from matplotlib.colors import LogNorm
 from math import comb
-
 from tqdm import tqdm
+from pathlib import Path
 
 from optimize import x_to_rotation
 from xs_to_metrics import subspace_matrix
@@ -84,10 +87,6 @@ def visualize_nc(moldata, state, U, mo=True, save=False):
     G = all_quartet_commutators(moldata,
                                 state,
                                 U)
-
-    print("NC factors")
-    # for e in G.edges(data=True):
-    #     print(e[0], e[1], e[2]['weight'])
 
     if mo:
         plt.figure()
@@ -212,7 +211,7 @@ def sector_metrics(moldata, state, U,
 
 
         if subspace_energy < target_energy:
-            print("K_en = {0:}".format(i + 1))
+            # print("K_en = {0:}".format(i + 1))
             K_en =  i + 1
             break
     else:
@@ -224,16 +223,16 @@ def sector_metrics(moldata, state, U,
         for i in range(len(sector_eigen_decompositions[sector_label][0])):
             vector_id_in_sector = vector_labels[energy_order[i]][1]
             vector = sector_eigen_decompositions[sector_label][1][:, vector_id_in_sector]
-            projected_reference = state[sectors[sector_label]]
+            projected_reference = rotated_state[sectors[sector_label]]
             pooled_overlaps[(sector_label, i)] = abs(vector.T.conj() @ projected_reference)**2
 
-    overlap_order = np.argsort(list(pooled_overlaps.values()))
+    overlap_order = np.argsort(list(pooled_overlaps.values()))[::-1]
 
-    # pulling vectors by their local energies
+    # pulling vectors by their local overlaps with FCI
     current_state_vectors = np.array(())
     for i in tqdm(range(len(overlap_order))):
-        sector_label = vector_labels[energy_order[i]][0]
-        vector_id_in_sector = vector_labels[energy_order[i]][1]
+        sector_label = vector_labels[overlap_order[i]][0]
+        vector_id_in_sector = vector_labels[overlap_order[i]][1]
         next_vector = sector_eigen_decompositions[sector_label][1][:, vector_id_in_sector]
         next_vector_big = np.zeros(rotated_h_linop.shape[0], dtype="complex")
         next_vector_big[sectors[sector_label]] = next_vector
@@ -255,22 +254,52 @@ def sector_metrics(moldata, state, U,
 
 
         if subspace_energy < target_energy:
-            print("K_overlap = {0:}".format(i + 1))
+            # print("K_overlap = {0:}".format(i + 1))
             K_overlap =  i + 1
             break
     else:
         K_overlap = np.nan
         print("Chemical accuracy not reached, try more vectors per sector")
 
+    energy_vectors_used = [vector_labels[i] for i in energy_order[:K_en]]
+    energy_sectors_used = list(set([s[0] for s in energy_vectors_used]))
+
+    overlap_vectors_used = [vector_labels[i] for i in overlap_order[:K_overlap]]
+    overlap_sectors_used = list(set([s[0] for s in overlap_vectors_used]))
 
 
-if __name__=="__main__":
+    # born_oppenheimer_vectors
+    born_oppenheimer_vectors = []
+    for sector_label, (w, v) in sector_eigen_decompositions.items():
+        lowest_vector_id = np.argmin(w)
+        lowest_vector = v[:, lowest_vector_id]
+        next_vector_big = np.zeros(rotated_h_linop.shape[0], dtype="complex")
+        next_vector_big[sectors[sector_label]] = lowest_vector
+
+        born_oppenheimer_vectors.append(next_vector_big)
+
+    bo_vectors_stacked = np.vstack(born_oppenheimer_vectors)
+    h_subspace = bo_vectors_stacked.conj() @ rotated_h_linop @ bo_vectors_stacked.T
+
+    es_bo, _ = scipy.sparse.linalg.eigsh(h_subspace, which="SA", k=1)
+
+    sector_data = {"K_en": K_en,
+                   "K_overlap": K_overlap,
+                   "Energy sectors": energy_sectors_used,
+                   "Ovelap sectors": overlap_sectors_used,
+                   "Decoupled_energy": min(list(pooled_energies.values())),
+                   "BO energy": min(es_bo)
+                   }
+
+    return sector_data
+
+
+def args_parser():
     parser = argparse.ArgumentParser(description="Optimize orbitals and/or graph structure "
                                                  "to find two-orbital quasisymmetries ('quartets')",
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("molpath",
                         help="path to the Hamiltonian (PySCF checkfile)")
-    parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--reference",
                         help="reference state to use in calculations (default: fci)",
                         default="fci")
@@ -283,6 +312,14 @@ if __name__=="__main__":
     parser.add_argument("--visualize", action="store_true",
                         help="Draw the NC metrics after optimization")
     parser.add_argument("--quartet_graph", default="ring")
+    parser.add_argument("--initial_guess", default=None)
+    parser.add_argument("--initial_guess_scale",
+                        default=-2, type=int)
+    return parser
+
+
+if __name__=="__main__":
+    parser = args_parser()
     args = parser.parse_args()
 
     print("loading the hamiltonian")
@@ -311,6 +348,9 @@ if __name__=="__main__":
 
     if args.quartet_graph == "ring":
         quartet_graph = nx.cycle_graph(moldata.norb)
+    elif args.quartet_graph == "matching":
+        edges = [(2 * i, 2 * i + 1) for i in range(moldata.norb // 2)]
+        quartet_graph = nx.from_edgelist(edges)
     else:
         raise ValueError()
     print(list(quartet_graph.edges()))
@@ -321,8 +361,16 @@ if __name__=="__main__":
     elif args.optimization_mode == "OO":
         print("Optimizing orbitals keeping the quartet graph fixed")
         f = nc_cost(moldata, state, quartet_graph)
-        x0 = np.zeros(comb(moldata.norb, 2))
-        print("NC cost, Canonical orbitals", f(x0))
+
+        if args.initial_guess == "random":
+            rng = np.random.default_rng()
+            x0 = rng.normal(scale=10**(args.initial_guess_scale),
+                            size=comb(moldata.norb, 2))
+            print("NC cost, random initial guess {0:2.4f}".format(f(x0)))
+        else:
+            x0 = np.zeros(comb(moldata.norb, 2))
+            print("NC cost, canonical orbitals {0:2.4f}".format(f(x0)))
+
         res = scipy.optimize.minimize(f, x0, method="L-BFGS-B", options={"maxiter": 100})
         print(res)
         U = x_to_rotation(res.x, moldata.norb)
@@ -338,21 +386,41 @@ if __name__=="__main__":
     # with optimized quartets we can partition the function
 
     best_quartet_indices = np.argsort(opt_quartets_matrix[iu])[:moldata.norb - 1]
-    best_quartets = [(iu[0][i], iu[1][i]) for i in best_quartet_indices]
+    best_quartets = tuple([(int(iu[0][i]), int(iu[1][i]))
+                     for i in best_quartet_indices])
     print("m-1 lowest NC factor quartets")
     print(best_quartets)
 
     print("creating sectors")
     sectors = quartet_sectors(best_quartets, moldata.norb, moldata.nelec)
 
-    sector_metrics(moldata, state, U, sectors,
+    sector_data = sector_metrics(moldata, state, U, sectors,
                    target_energy=cisolver.e_tot + 0.0016)
 
-
-
-
+    for k, v in sector_data.items():
+        print(k, v)
 
     if args.visualize:
         visualize_nc(moldata, state, U)
+
+    output = {"vars": vars(args),
+              "sector_data": sector_data,
+              "lowest_nc_quartets": best_quartets,
+              "lowest_m_quartet_sum_mo": sum_of_lowest_mo_quartets,
+              "lowest_m_quartet_sum_opt": sum_of_lowest_opt_quartets,
+              "FCI energy": cisolver.e_tot}
+    stamp = uuid.uuid4().hex[:6]
+
+    path_to_mol = Path(args.molpath)
+    title = "quartets_" + path_to_mol.name + "_" + stamp
+    with open(title, "a") as fp:
+        json.dump(output, fp)
+
+    np.savetxt("quartet_U_" + path_to_mol.name + "_" + stamp + ".txt", U)
+    np.savetxt("quartets_nc_" + path_to_mol.name + "_" + stamp + ".txt",
+               opt_quartets_matrix)
+
+
+
 
 
