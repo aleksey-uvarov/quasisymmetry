@@ -9,6 +9,8 @@ import time
 import ffsim
 import scipy
 import pyscf
+import pyscf.fci
+
 import networkx as nx
 import matplotlib.pyplot as plt
 import jax
@@ -85,7 +87,9 @@ def quartet_noncommutation_factor(h,
     return np.linalg.norm(state_after_commutator)**2
 
 
-def visualize_nc(moldata, state, U, mo=True, save=False):
+def visualize_nc(mol, moldata, state, U, mo=True, save=False):
+    raise NotImplementedError()
+
     G = all_quartet_commutators(moldata,
                                 state,
                                 U)
@@ -325,34 +329,49 @@ if __name__=="__main__":
     parser = args_parser()
     args = parser.parse_args()
 
-    # print("loading the hamiltonian")
-    # mol = pyscf.lib.chkfile.load_mol(args.molpath)
-    # mf = pyscf.scf.RHF(mol)
-    # mf.update_from_chk(args.molpath)
-    # moldata = ffsim.MolecularData.from_scf(mf)
+    moldata = load_moldata(args.molpath)
 
     p = Path(args.molpath)
     if p.suffix == ".chk":
         mol = pyscf.lib.chkfile.load_mol(args.molpath)
-        scf = pyscf.scf.RHF(mol)
-        scf.update_from_chk(args.molpath)
+        scf_data = pyscf.lib.chkfile.load(args.molpath, "scf")
 
-        moldata = ffsim.MolecularData.from_scf(scf)
+        norb = mol.nao
+        nelec = mol.nelec
+        mo_coeff = scf_data["mo_coeff"]
+        hcore_ao = mol.intor("int1e_kin") + mol.intor("int1e_nuc")
+        h1 = mo_coeff.T @ hcore_ao @ mo_coeff
+        eri = pyscf.ao2mo.full(mol, mo_coeff)
+        ecore = mol.energy_nuc()
+
     elif p.suffix == ".FCIDUMP":
-        dumpdata = pyscf.tools.fcidump.read(args.molpath, verbose=False)
         scf = pyscf.tools.fcidump.to_scf(args.molpath)
-        moldata = ffsim.MolecularData.from_fcidump(args.molpath)
+        dumpdata = pyscf.tools.fcidump.read(args.molpath,
+                                            verbose=False)
+
+        norb = dumpdata["NORB"]
+        nelec = dumpdata["NELEC"]
+        h1 = dumpdata["H1"]
+        eri = dumpdata["H2"]
+        ecore = dumpdata["ECORE"]
+    else:
+        raise ValueError()
 
 
     print("finding fci") # we need it for energy metrics anyway
-    scf.kernel()
-    cisolver = pyscf.fci.FCI(scf)
-    cisolver.kernel()
+
+    cisolver = pyscf.fci.direct_spin1.FCI()
+    e, fcivec = cisolver.kernel(
+        h1,
+        eri,
+        norb,
+        nelec,
+        ecore=ecore,
+    )
+
 
     if args.reference == "fci":
-        state = np.array(cisolver.ci.reshape((-1,)), dtype="complex") # ffsim will complain without dtype='complex'
-        state = ffsim.apply_orbital_rotation(state, scf.mo_coeff, moldata.norb, moldata.nelec)
-        # because some funny implicit rotation is going on
+        state = np.array(fcivec.reshape((-1,)), dtype="complex")  # ffsim will complain without dtype='complex'
     elif args.reference == "hf":
         state = ffsim.hartree_fock_state(moldata.norb, moldata.nelec)
     else:
@@ -360,9 +379,11 @@ if __name__=="__main__":
 
     print("FCI energy")
     print(cisolver.e_tot)
-    h = ffsim.linear_operator(moldata.hamiltonian, moldata.norb, moldata.nelec)
-    print(state.T.conj() @ h @ state)
-
+    # h = ffsim.linear_operator(moldata.hamiltonian, moldata.norb, moldata.nelec)
+    # print(state.T.conj() @ h @ state)
+    # w, v = scipy.sparse.linalg.eigsh(h, which="SA", k=1)
+    # print(w)
+    #
     # exit()
 
 
