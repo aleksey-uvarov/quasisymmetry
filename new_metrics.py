@@ -11,7 +11,7 @@ from math import comb
 import matplotlib.pyplot as plt
 
 from chemistry import load_moldata, fcidump_data
-from new_optimize import parity_matrix_to_quasisymmetries, x_to_rotation, get_fci
+from new_optimize import parity_matrix_to_quasisymmetries, x_to_rotation, get_fci, commutator_cost
 
 
 def symmetry_sectors(parity_matrix, norb, nelec):
@@ -84,11 +84,16 @@ def submatrix_eigenvalues_to_target(A: np.ndarray, e_target: float):
             raise ValueError("this should never happen")
 
 
-def selected_column_solver(A: np.ndarray, e_target, thr=1e-8):
-    lowest_diag_index = np.argmin(np.diag(A))
+def selected_column_solver(A: np.ndarray, e_target, thr=1e-8, start="zero"):
+    if start == "zero":
+        starting_index = 0
+    elif start == "energy":
+        starting_index = np.argmin(np.diag(A))
+    else:
+        raise ValueError()
     vector_count = -1
     current_vector = np.zeros(A.shape[0])
-    current_vector[lowest_diag_index] = 1
+    current_vector[starting_index] = 1
     current_round = 0
     current_dimension = 1
     while vector_count == -1:
@@ -119,8 +124,8 @@ if __name__=="__main__":
                         help="path to the incidence matrix of symmetries")
     parser.add_argument("--U", help="x as orbital rotation",
                         default=None)
-    parser.add_argument("--states_per_sector", type=int, default=10)
-    parser.add_argument("--K_method", default="PT")
+    parser.add_argument("--states_per_sector", type=int, default=100)
+    parser.add_argument("--K_start", default="zero")
     parser.add_argument("--check_if_enough", action="store_true")
     args = parser.parse_args()
 
@@ -137,10 +142,11 @@ if __name__=="__main__":
     sectors = symmetry_sectors(parity_matrix, moldata.norb, moldata.nelec)
 
     if args.U is not None:
-        x = np.loadtxt(args.U)
+        x = np.loadtxt(args.U, comments=["#", "{"])
         U = x_to_rotation(x, moldata.norb)
     else:
         U = np.eye(moldata.norb)
+        x = np.zeros(comb(moldata.norb, 2))
 
     rotated_h = moldata.hamiltonian.rotated(U)
     rotated_h_linop = ffsim.linear_operator(rotated_h,
@@ -149,6 +155,9 @@ if __name__=="__main__":
 
     e_fci, fcivec = get_fci(dumpdata)
     print("FCI ", e_fci)
+
+    f = commutator_cost(moldata, symmetries, fcivec)
+    print("fci NC cost", f(x))
 
     print("qty of sectors ", len(sectors.keys()))
 
@@ -176,6 +185,10 @@ if __name__=="__main__":
     print("Lowest sector energy and label")
     print(smallest, lowest_sector_label)
 
+    maxdim = np.max([h.shape[0] for h in sector_hamiltonians.values()])
+    print("Largest subspace dimension", maxdim)
+    zerodim = sector_hamiltonians[tuple([0] * parity_matrix.shape[0])].shape[0]
+    print("Zero parity subspace dimension", zerodim)
 
 
     # joint_space_dimension = sum([w[0].shape[0] for w in sector_gs_pairs.values()])
@@ -201,9 +214,16 @@ if __name__=="__main__":
         if w_subspace - e_fci > 0.0016:
             print("Not enough states to reach chemical accuracy, increase states_per_sector")
             quit()
-    K, v = selected_column_solver(h_subspace, e_fci + 0.0016)
+    if args.K_start == "zero":
+        print("Using the all-even sector for the start")
+        print(list(sectors.keys())[0])
+        K, v = selected_column_solver(h_subspace, e_fci + 0.0016, start="zero")
+    elif args.K_start == "energy":
+        K, v = selected_column_solver(h_subspace, e_fci + 0.0016, start="energy")
+    else:
+        raise ValueError()
     print("K ", K)
-    print("variance ", v.T.conj() @ h_subspace @ h_subspace @ v - (v.T.conj() @ h_subspace @ v) ** 2)
+    # print("variance ", v.T.conj() @ h_subspace @ h_subspace @ v - (v.T.conj() @ h_subspace @ v) ** 2)
 
 
 
