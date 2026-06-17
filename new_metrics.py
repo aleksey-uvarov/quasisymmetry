@@ -3,6 +3,7 @@ import pyscf
 import ffsim
 import numpy as np
 import scipy
+import scipy.sparse.linalg
 import json
 from tqdm import tqdm
 from pathlib import Path
@@ -141,6 +142,23 @@ def selected_column_solver(A: np.ndarray, e_target, thr=1e-8, start="zero"):
     return vector_count, current_vector
 
 
+def orthogonalize_degenerate(w, V, tol=1e-10):
+    V_orth = V.copy()
+
+    start = 0
+    while start < len(w):
+        end = start + 1
+        while end < len(w) and abs(w[end] - w[start]) < tol:
+            end += 1
+
+        # Orthogonalize this degenerate block
+        Q, _ = scipy.linalg.qr(V[:, start:end], mode='economic')
+        V_orth[:, start:end] = Q
+
+        start = end
+    return V_orth
+
+
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
         description="Calculate the metrics")
@@ -150,9 +168,12 @@ if __name__=="__main__":
                         help="path to the incidence matrix of symmetries")
     parser.add_argument("--U", help="x as orbital rotation",
                         default=None)
-    parser.add_argument("--states_per_sector", type=int, default=100)
+    parser.add_argument("--states_per_sector", type=int, default=20)
     parser.add_argument("--K_start", default="energy")
     parser.add_argument("--check_if_enough", action="store_true")
+    parser.add_argument("--born_huang", action="store_true",
+                        help="calculate 'K' by increasing the number of states per sector,"
+                             "up to --states_per_sector")
     args = parser.parse_args()
 
     moldata = load_moldata(args.molpath)
@@ -201,8 +222,12 @@ if __name__=="__main__":
     print("Calculating sector eigenvalues")
     for sector_label, h_local in tqdm(sector_hamiltonians.items()):
         if args.states_per_sector <= h_local.shape[0] - 2:
-            sector_gs_pairs[sector_label] = scipy.sparse.linalg.eigsh(
+            w, v = scipy.sparse.linalg.eigsh(
                 h_local, which="SA", k=args.states_per_sector)
+            v = v[:, np.argsort(w)]
+            w = np.sort(w)
+            v_orth = orthogonalize_degenerate(w, v)
+            sector_gs_pairs[sector_label] = w, v_orth
         else:
             sector_gs_pairs[sector_label] = np.linalg.eigh(h_local)
         if np.min(sector_gs_pairs[sector_label][0]) < smallest:
@@ -210,7 +235,11 @@ if __name__=="__main__":
             lowest_sector_label = sector_label
     print("Lowest sector energy and label")
     print(smallest, lowest_sector_label)
-    print(smallest - e_fci)
+    de_dec = smallest - e_fci
+    print("Decoupled error ", smallest - e_fci)
+    if de_dec < 0.0016:
+        print("K = 1")
+        quit()
 
     maxdim = np.max([h.shape[0] for h in sector_hamiltonians.values()])
     print("Largest subspace dimension", maxdim)
@@ -234,8 +263,52 @@ if __name__=="__main__":
                                                 dtype="complex")
         full_space_vectors_in_sector[v, :] = sector_gs_pairs[k][1]
         full_space_vectors.append(full_space_vectors_in_sector)
+        # A = (full_space_vectors_in_sector.T.conj() @ full_space_vectors_in_sector)
+        # B = sector_gs_pairs[k][1].T.conj() @ sector_gs_pairs[k][1]
+        # print(np.linalg.norm(A - np.eye(A.shape[0])))
+        # print(np.linalg.norm(B - np.eye(B.shape[0])))
+
 
     full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
+
+  # if you use it on N2, you will run out of memory
+
+
+    if args.born_huang:
+        print("Picking L states per sector and finding the energy")
+        for L in range(1, args.states_per_sector + 1):
+            print("L = {0:}".format(L), end=" ")
+            vectors_stacked = np.concatenate(
+                [w[:, :L] for w in full_space_vectors],
+                                             axis=1)
+            print("dim = {0:}".format(vectors_stacked.shape[1]), end=" ")
+            # subspace_op = scipy.sparse.linalg.LinearOperator(
+            #     (vectors_stacked.shape[1], vectors_stacked.shape[1]),
+            #     matvec=lambda x: vectors_stacked.T.conj() @ rotated_h_linop @ vectors_stacked @ x,
+            # )
+            subspace_op = vectors_stacked.T.conj() @ rotated_h_linop @ vectors_stacked
+            w, v = scipy.sparse.linalg.eigsh(subspace_op, which="SA", k=1)
+            print("dE ", w - e_fci)
+            if w[0] < e_fci + 0.0016:
+                full_space_solution = vectors_stacked @ v[:, 0]
+                eeeee = full_space_solution.T.conj() @ rotated_h_linop @ full_space_solution
+                print(eeeee)
+                print(np.linalg.norm(full_space_solution))
+                print("{0:} states per sector is enough".format(L))
+                abs_coeffs_sorted = np.argsort(np.abs(v[:, 0]**2))[::-1]
+                for k in range(1, v.shape[0]):
+                    compressed_vector = np.zeros_like(v[:, 0], dtype="complex")
+                    compressed_vector[abs_coeffs_sorted[:k]] = v[abs_coeffs_sorted[:k], 0]
+                    compressed_vector /= np.linalg.norm(compressed_vector)
+                    e_compressed = compressed_vector.T.conj() @ subspace_op @ compressed_vector
+                    print(e_compressed - e_fci)
+                    if e_compressed - e_fci < 0.0016:
+                        print("K = {0:}".format(k))
+                        quit()
+                quit()
+        else:
+            print("Chemical accuracy not reached ")
+            quit()
 
     h_subspace = full_space_vectors_cat.T.conj() @ rotated_h_linop @ full_space_vectors_cat
 
@@ -245,6 +318,7 @@ if __name__=="__main__":
         if w_subspace - e_fci > 0.0016:
             print("Not enough states to reach chemical accuracy, increase states_per_sector")
             quit()
+
     if args.K_start == "zero":
         print("Using the first sector for the start")
         print(list(sectors.keys())[0])
