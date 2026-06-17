@@ -151,7 +151,7 @@ if __name__=="__main__":
     parser.add_argument("--U", help="x as orbital rotation",
                         default=None)
     parser.add_argument("--states_per_sector", type=int, default=100)
-    parser.add_argument("--K_start", default="zero")
+    parser.add_argument("--K_start", default="energy")
     parser.add_argument("--check_if_enough", action="store_true")
     args = parser.parse_args()
 
