@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 from matplotlib.colors import LogNorm
 
-from new_optimize import parities, get_fci, x_to_rotation
+from optimize_orbitals import parities, get_fci, x_to_rotation
 from chemistry import load_moldata, fcidump_data
 
 
