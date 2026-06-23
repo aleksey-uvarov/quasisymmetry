@@ -1,0 +1,10 @@
+pyscf
+ffsim
+numpy
+scipy
+matplotlib
+openfermion
+openfermion
+openfermionpyscf
+dataclasses
+
