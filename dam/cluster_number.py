@@ -93,8 +93,32 @@ def commutator_cost_v2(moldata: ffsim.MolecularData,
         return total_nc
     return f
 
-#TODO implement based on metrics.symmetry_sectors
-# def cluster_number_symmetry_sectors(cluster_number_matrix, norb, nelec):
+
+# Template to design alternative cost functions:
+
+# def build_other_cost_function(moldata: ffsim.MolecularData,
+#                    symmetries: list,
+#                    reference_state: np.ndarray) -> Callable:
+#
+# def f(x):
+#       # ...
+#    return f
+
+def number_and_parity_symmetry_sectors(cluster_number_matrix, cluster_parity_matrix, norb, nelec):
+    if len(cluster_number_matrix) > 0:
+        if cluster_number_matrix.shape[1] != norb:
+            raise ValueError("cluster_number_matrix must be a list of length-norb binary lists")
+    if len(cluster_parity_matrix) > 0:
+        if cluster_parity_matrix.shape[1] != norb:
+            raise ValueError("cluster_parity_matrix must be a list of length-norb binary lists")
+
+    dim = comb(norb, nelec[0]) * comb(norb, nelec[1])
+
+    sectors = {}
+
+    #TODO implement based on metrics.symmetry_sectors. Think it through. If len(cluster_number_matrix) == 0 or len(cluster_parity_matrix) == 0 (or both), you want to keep clean dict keys...
+
+    return sectors
     
 
 #TODO write code for the two scatterplots.
