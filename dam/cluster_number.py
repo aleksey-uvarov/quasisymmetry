@@ -42,14 +42,16 @@ def build_two_orb_num_operators(norb, nelec):
     return two_orb_number_operators
 
 
-def cluster_matrix_to_cluster_number_quasisymmetries(cluster_matrix: np.ndarray,
+def number_matrix_to_operators(cluster_number_matrix: np.ndarray,
                                      norb,
                                      nelec):
-    """Returns a list of cluster number operators. The orbitals of the i th operator correspond to the 1's in the ith row of the binary cluster_matrix."""
+    """Returns a list of cluster number operators. The orbitals of the i th operator correspond to the 1's in the ith row of the binary cluster_number_matrix."""
+    if len(cluster_number_matrix) == 0:
+        return([])
     # Probably this won't be a bottleneck, but may want to avoid multiple 
     # one_orb_num_operators calls (see build_two_orb_num_operators)
-    if cluster_matrix.shape[1] != norb:
-        raise ValueError("shape[1] of cluster_matrix must equal norb")
+    if cluster_number_matrix.shape[1] != norb:
+        raise ValueError("shape[1] of cluster_number_matrix must equal norb")
     
     # get one-orbital number operators
     one_orb_num_operators = build_one_orb_num_operators(norb, nelec)
@@ -58,8 +60,8 @@ def cluster_matrix_to_cluster_number_quasisymmetries(cluster_matrix: np.ndarray,
     operators = [] # will contain the cluster number/quasisymmetry operators
     dim = scipy.special.comb(norb, nelec[0], exact=True) * scipy.special.comb(norb, nelec[1], exact=True)  # Hilbert space dim
     zero_op = LinearOperator((dim, dim), matvec=lambda v: np.zeros_like(v))
-    for i in range(cluster_matrix.shape[0]):
-        summands = [one_orb_num_operators[j] for j in range(norb) if cluster_matrix[i][j] == 1]
+    for i in range(cluster_number_matrix.shape[0]):
+        summands = [one_orb_num_operators[j] for j in range(norb) if cluster_number_matrix[i][j] == 1]
         operators.append(sum(summands, start=zero_op))
     return(operators)
 
@@ -92,7 +94,7 @@ def commutator_cost_v2(moldata: ffsim.MolecularData,
     return f
 
 #TODO implement based on metrics.symmetry_sectors
-# def cluster_number_symmetry_sectors(cluster_matrix, norb, nelec):
+# def cluster_number_symmetry_sectors(cluster_number_matrix, norb, nelec):
     
 
 #TODO write code for the two scatterplots.

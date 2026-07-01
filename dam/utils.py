@@ -32,13 +32,13 @@ def get_heatmap_data(h, ref_state, norb, diag_operators, off_diag_operators, ups
     return nc_scores
 
 #compare with show_symmetries.py, lines 64–76
-def show_heatmap(nc_scores, vmin=None, vmax=None):
+def show_heatmap(nc_scores, vmin=None, vmax=None, title='Quasisymmetry discovery'):
     """Visualize the non-commutativity heatmap"""
     norb = np.shape(nc_scores)[0]
     plt.figure(figsize=(8, 6))
     plt.imshow(nc_scores, norm=LogNorm(vmin=vmin, vmax=vmax), cmap='viridis')
     plt.colorbar(label='Non-commutativity norm (log scale)')
-    plt.title('Quasisymmetry discovery')
+    plt.title(title)
 
     # Add text annotations for exact values
     for i in range(norb):
