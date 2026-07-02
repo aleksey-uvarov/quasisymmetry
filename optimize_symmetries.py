@@ -63,6 +63,8 @@ def parity_matrix_to_quasisymmetries(parity_matrix: np.ndarray,
                                      norb,
                                      nelec):
     local_parities = parities(norb, nelec)
+    if len(parity_matrix) == 0: # damiano's code needs this
+    return([])
     if parity_matrix.shape[1] == norb:
         operators = []
         for i in range(parity_matrix.shape[0]):
