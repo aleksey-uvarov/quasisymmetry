@@ -1,15 +1,9 @@
-import argparse
 import numpy as np
-import time
 import ffsim
 import scipy
-import pyscf
-import pyscf.fci
 from scipy.sparse.linalg import LinearOperator
-
-from typing import Callable
 from math import comb
-from functools import cache, reduce
+from functools import cache
 
 from utils import integers_to_phases_polynomial
 
@@ -81,56 +75,56 @@ def number_matrix_to_operators(cluster_number_matrix: np.ndarray,
             operators.append(from_num_operator_to_expnum_operator(num_operator, int(max_num_eval)))
     return(operators)
 
-def x_to_rotation(x, norb):
-    iu = np.triu_indices(norb, k=1)
-    rotation_generator = np.zeros((norb, norb))
-    rotation_generator[iu] = x
-    rotation_generator -= rotation_generator.T
-    return scipy.linalg.expm(rotation_generator)
-
-def commutator_cost_v2(moldata: ffsim.MolecularData,
-                    symmetries: list,
-                    reference_state: np.ndarray) -> Callable:
-    def f(x):
-        U = x_to_rotation(x, moldata.norb)
-        rotated_state = ffsim.apply_orbital_rotation(reference_state,
-                                                     U,
-                                                     moldata.norb,
-                                                     moldata.nelec)
-        h = ffsim.linear_operator(moldata.hamiltonian.rotated(U),
-                                  norb=moldata.norb, nelec=moldata.nelec)
-        total_nc = 0
-        h_on_rotate_state = h @ rotated_state
-        for s in symmetries:
-            term1 = h @ (s @ rotated_state)
-            term2 = s @ h_on_rotate_state
-            commutator_on_state = term1 - term2
-            total_nc += np.linalg.norm(commutator_on_state)**2
-        return total_nc
-    return f
-
-
-# Template to design alternative cost functions:
-
-# def build_other_cost_function(moldata: ffsim.MolecularData,
-#                    symmetries: list,
-#                    reference_state: np.ndarray) -> Callable:
-#
-# def f(x):
-#       # ...
-#    return f
-
 def number_and_parity_symmetry_sectors(cluster_number_matrix, cluster_parity_matrix, norb, nelec):
+    # input shape checks
     if len(cluster_number_matrix) > 0:
         if cluster_number_matrix.shape[1] != norb:
             raise ValueError("cluster_number_matrix must be a list of length-norb binary lists")
+        cluster_number_matrix_to_int = []
+        for cluster in cluster_number_matrix:
+            # convert clusters from binary to integers; can't do directly due to order
+            cluster_int = 0
+            for i, bit in enumerate(cluster):
+                if bit:  # If the bit is 1
+                    cluster_int |= (1 << i)  # Set the i-th bit to 1
+            cluster_number_matrix_to_int.append(cluster_int)
     if len(cluster_parity_matrix) > 0:
         if cluster_parity_matrix.shape[1] != norb:
             raise ValueError("cluster_parity_matrix must be a list of length-norb binary lists")
+        # same as above
+        cluster_parity_matrix_to_int = []
+        for cluster in cluster_parity_matrix:
+            cluster_int = 0
+            for i, bit in enumerate(cluster):
+                if bit:  # If the bit is 1
+                    cluster_int |= (1 << i)  # Set the i-th bit to 1
+            cluster_parity_matrix_to_int.append(cluster_int)
 
-    dim = comb(norb, nelec[0]) * comb(norb, nelec[1])
+    dim = comb(norb, nelec[0]) * comb(norb, nelec[1])  
+    alpha_indices, beta_indices = ffsim.addresses_to_strings(
+    range(dim), norb, nelec,
+    bitstring_type=ffsim.BitstringType.INT,
+    concatenate=False
+    ) # integers corresponding to FLIPPED alpha/beta bitstrings of basis determinants
+    sectors = {}  
+    for i in range(dim):
+        if len(cluster_number_matrix) == 0:
+            sector_label_num = ()
+        else:
+            sector_label_num = (cluster_int & alpha_indices[i] + cluster_int & beta_indices[i] for cluster_int in cluster_number_matrix_to_int)
+        if len(cluster_parity_matrix) == 0:
+            sector_label_par = ()
+        else:
+            sector_label_num = ((cluster_int & alpha_indices[i] + cluster_int & beta_indices[i]) % 2 for cluster_int in cluster_parity_matrix_to_int)
+        sector_label = (sector_label_num, sector_label_par)
+        sectors.setdefault(sector_label, []).append(i)
 
-    sectors = {}
+    return sectors
+    
+
+
+
+
 
     #TODO implement based on metrics.symmetry_sectors. Think it through. If len(cluster_number_matrix) == 0 or len(cluster_parity_matrix) == 0 (or both), you want to keep clean dict keys...
 

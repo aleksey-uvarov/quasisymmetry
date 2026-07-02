@@ -33,7 +33,7 @@ def test_spin_orbital_occupations():
     expected_occupations = [[1, 0, 0, 1, 1, 0], [1, 0, 0, 1, 0, 1], [1, 0, 0, 0, 1, 1], 
                             [0, 1, 0, 1, 1, 0], [0, 1, 0, 1, 0, 1], [0, 1, 0, 0, 1, 1], 
                             [0, 0, 1, 1, 1, 0], [0, 0, 1, 1, 0, 1], [0, 0, 1, 0, 1, 1]]
-
+    # later, when using bitstrings, watch out for possible (intra-alpha/beta) flips.
     # get actual basis ordering
     for i in range(9):
         basis_elem = np.eye(9)[i]
@@ -110,5 +110,6 @@ def test_number_matrix_to_operators():
             assert np.allclose(cluster_num_operators[j] @ basis_elem, expected_cluster_num_operators[j] @ basis_elem)
             assert np.allclose(cluster_expnum_operators[j] @ basis_elem, expected_cluster_expnum_operators[j] @ basis_elem)
 
-
-# def test_cluster_number_symmetry_sectors: #TODO
+def test_number_and_parity_symmetry_sectors():
+    assert 0 == 0
+    #TODO also call symmetry_sectors for comparison.
