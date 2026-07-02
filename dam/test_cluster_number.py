@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 import scipy
 import ffsim
-from cluster_number import build_one_orb_num_operators, build_two_orb_num_operators, cluster_matrix_to_cluster_number_quasisymmetries
+from cluster_number import build_one_orb_num_operators, build_two_orb_num_operators, number_matrix_to_operators, from_num_operator_to_expnum_operator
+from utils import integers_to_phases_polynomial
+from scipy.sparse.linalg import LinearOperator
 
 def test_spin_orbital_occupations():
     """Testing to get familiar with scipy/ffsim basis ordering and operator usage"""
@@ -69,18 +71,44 @@ def test_build_oneortwo_orb_num_operators():
         assert list(occupations) == expected_occupations[i]
         assert list(two_orb_occupations) == expected_two_orb_occupations[i]
 
+def test_integers_to_phases_polynomial():
+    def P(x, N):
+        coeffs = integers_to_phases_polynomial(N)
+        result = sum([coeffs[i] * x**i for i in range(N+1)])
+        return(result)
 
-def test_cluster_matrix_to_cluster_number_quasisymmetries():
+    for N in range(10):
+        for n in range(N + 1):
+            omega = np.exp(1j * 2 * np.pi / (N+1))
+            assert (omega ** n - P(n, N)).round(10) == 0
+
+def test_from_num_operator_to_expnum_operator():
+    integers = [0, 4, 6, 31, 19, 2]
+    matrix = np.diag(integers)
+    max_num_eval = max(integers)
+    dim = len(integers)
+    exp_integers = [np.exp(1.j * 2 * np.pi * n / (max_num_eval+1)) for n in integers]
+    num_operator = LinearOperator((dim, dim), matvec=lambda v: matrix @ v)
+    expnum_operator = from_num_operator_to_expnum_operator(num_operator, max_num_eval)
+    for i in range(dim):
+        basis_el = np.eye(dim)[i]
+        assert np.allclose(expnum_operator @ basis_el, exp_integers[i] * basis_el, atol = 1e-15, rtol = 1e-10)
+
+def test_number_matrix_to_operators():
     norb = 3
     nelec = (1, 2)
     cluster_matrix = np.array([[1, 0, 0], [1, 0, 1], [1, 1, 1]])
-    cluster_num_operators = cluster_matrix_to_cluster_number_quasisymmetries(cluster_matrix, norb, nelec)
-    expected_cluster_num_operators = [build_one_orb_num_operators(norb, nelec)[0], build_two_orb_num_operators(norb, nelec)[1], 3 * np.eye(9)]
+    # number operators
+    cluster_num_operators = number_matrix_to_operators(cluster_matrix, norb, nelec)
+    expected_cluster_num_operators = [build_one_orb_num_operators(norb, nelec)[0], build_two_orb_num_operators(norb, nelec)[1], LinearOperator((9, 9), matvec=lambda v: 3 * v)]
+    # exponentiated versions
+    cluster_expnum_operators = number_matrix_to_operators(cluster_matrix, norb, nelec, expnum=True)
+    expected_cluster_expnum_operators = [from_num_operator_to_expnum_operator(expected_cluster_num_operators[i], 2 * sum(cluster_matrix[i])) for i in range(3)]
     for i in range(9):
         basis_elem = np.eye(9)[i]
         for j in range(3):
             assert np.allclose(cluster_num_operators[j] @ basis_elem, expected_cluster_num_operators[j] @ basis_elem)
-
+            assert np.allclose(cluster_expnum_operators[j] @ basis_elem, expected_cluster_expnum_operators[j] @ basis_elem)
 
 
 # def test_cluster_number_symmetry_sectors: #TODO

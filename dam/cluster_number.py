@@ -11,6 +11,8 @@ from typing import Callable
 from math import comb
 from functools import cache, reduce
 
+from utils import integers_to_phases_polynomial
+
 # from chemistry import load_moldata, fcidump_data # may need to modify path
 
 @cache # consider modifying output to tuple, so cached output will be immutable
@@ -41,10 +43,19 @@ def build_two_orb_num_operators(norb, nelec):
             two_orb_number_operators.append(one_orb_num_operators[i] + one_orb_num_operators[j])
     return two_orb_number_operators
 
+    
+def from_num_operator_to_expnum_operator(num_operator, max_num_eval):
+    """Returns LinearOperator exp(i * pi * num_operator / (max_num_eval + 1)), built efficiently"""
+    dim = num_operator.shape[0]
+    zero_op = LinearOperator((dim, dim), matvec=lambda v: np.zeros_like(v))
+    coeffs = integers_to_phases_polynomial(max_num_eval)
+    summands = [coeffs[n] * (num_operator ** n) for n in range(max_num_eval+1)]
+    return sum(summands, start=zero_op)
 
 def number_matrix_to_operators(cluster_number_matrix: np.ndarray,
                                      norb,
-                                     nelec):
+                                     nelec,
+                                     expnum=False):
     """Returns a list of cluster number operators. The orbitals of the i th operator correspond to the 1's in the ith row of the binary cluster_number_matrix."""
     if len(cluster_number_matrix) == 0:
         return([])
@@ -62,7 +73,12 @@ def number_matrix_to_operators(cluster_number_matrix: np.ndarray,
     zero_op = LinearOperator((dim, dim), matvec=lambda v: np.zeros_like(v))
     for i in range(cluster_number_matrix.shape[0]):
         summands = [one_orb_num_operators[j] for j in range(norb) if cluster_number_matrix[i][j] == 1]
-        operators.append(sum(summands, start=zero_op))
+        num_operator = sum(summands, start=zero_op)
+        if expnum == False:
+            operators.append(num_operator)
+        else:
+            max_num_eval = 2 * sum(cluster_number_matrix[i]) # max cluster number eval = 2 * number of orbitals in the cluster
+            operators.append(from_num_operator_to_expnum_operator(num_operator, int(max_num_eval)))
     return(operators)
 
 def x_to_rotation(x, norb):
@@ -119,6 +135,5 @@ def number_and_parity_symmetry_sectors(cluster_number_matrix, cluster_parity_mat
     #TODO implement based on metrics.symmetry_sectors. Think it through. If len(cluster_number_matrix) == 0 or len(cluster_parity_matrix) == 0 (or both), you want to keep clean dict keys...
 
     return sectors
-    
 
 #TODO write code for the two scatterplots.
