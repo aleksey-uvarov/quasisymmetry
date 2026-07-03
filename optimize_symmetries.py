@@ -38,6 +38,22 @@ def commutator_cost(moldata: ffsim.MolecularData,
     return f
 
 
+def variance_cost(moldata: ffsim.MolecularData,
+                    symmetries: list,
+                    reference_state: np.ndarray) -> Callable:
+    def f(x):
+        U = x_to_rotation(x, moldata.norb)
+        rotated_state = ffsim.apply_orbital_rotation(reference_state,
+                                                     U,
+                                                     moldata.norb,
+                                                     moldata.nelec)
+        total_var = 0
+        for s in symmetries:
+            total_var += 1 - ((rotated_state.T.conj() @ s @ rotated_state)**2).real
+        return total_var
+    return f
+
+
 @cache
 def parities(norb, nelec):
     local_parities = []
@@ -302,7 +318,13 @@ if __name__=="__main__":
     else:
         raise ValueError("reference must be fci or hf")
 
-    f = commutator_cost(moldata, symmetries, state)
+    if args.cost_function == "NC":
+        f = commutator_cost(moldata, symmetries, state)
+    elif args.cost_function == "variance":
+        f = variance_cost(moldata, symmetries, state)
+    else:
+        raise ValueError("cost must be 'NC' or 'variance'")
+    
 
     if args.x0 is None:
         x0 = np.zeros(comb(moldata.norb, 2))

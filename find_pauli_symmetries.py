@@ -15,9 +15,10 @@ from itertools import combinations
 
 from chemistry import load_moldata, fcidump_data
 
-from src.state_utils import get_cisd_gs, get_fci_state_openfermion
+from src.state_utils import get_cisd_gs, get_hf_occ, get_hf_wfn
 from src.bs.beam import beam_search_symmetries, BeamSearch_Symmetries
 from src.bs.utils import mask_to_qubit_operator
+from src.metrics import variance
 import fcidump_openfermion
 
 from optimize_symmetries import get_fci, expand_state, comm_sq_exp_fast
@@ -52,12 +53,20 @@ if __name__=="__main__":
         # e, gs, gs_info = get_fci_state_openfermion(mol)
         e, state = get_fci(dumpdata, flatten=False)
         ref_state = expand_state(mol, state)
+    elif args.reference == "hf":
+        hf_occ = get_hf_occ(mol.n_electrons, mol.n_orbitals, as_str=True)
+        ref_state = get_hf_wfn([int(s) for s in hf_occ])
+    elif args.reference == "cisd":
+        hf_occ = get_hf_occ(mol.n_electrons, mol.n_orbitals, as_str=True)
+        e, ref_state = get_cisd_gs(hf_occ, qubit_hamiltonian, n_qubits, 'wfs', tf='jw')
     else:
-        raise NotImplementedError()
+        raise ValueError('reference can be fci, cisd, hf')
 
     if args.cost_function == "NC":
         cost = lambda s_list: comm_sq_exp_fast(s_list, sparse_qubit_op,
                                                           ref_state, n_qubits)
+    elif args.cost_function == "variance":
+        cost = lambda s_list: variance(s_list, ref_state, n_qubits)
     else:
         raise NotImplementedError()
 
