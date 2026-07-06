@@ -1,10 +1,15 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from metrics import symmetry_sectors
 import numpy as np
 import pytest
 import scipy
 import ffsim
-from cluster_number import build_one_orb_num_operators, build_two_orb_num_operators, number_matrix_to_operators, from_num_operator_to_expnum_operator
+from cluster_number import build_one_orb_num_operators, build_two_orb_num_operators, number_matrix_to_operators, from_num_operator_to_expnum_operator, number_and_parity_symmetry_sectors
 from utils import integers_to_phases_polynomial
 from scipy.sparse.linalg import LinearOperator
+from metrics import symmetry_sectors
 
 def test_spin_orbital_occupations():
     """Testing to get familiar with scipy/ffsim basis ordering and operator usage"""
@@ -111,5 +116,38 @@ def test_number_matrix_to_operators():
             assert np.allclose(cluster_expnum_operators[j] @ basis_elem, expected_cluster_expnum_operators[j] @ basis_elem)
 
 def test_number_and_parity_symmetry_sectors():
-    assert 0 == 0
-    #TODO also call symmetry_sectors for comparison.
+    # both parities and numbers
+    norb = 3
+    nelec = (1, 2)
+    cluster_number_matrix = np.array([[1, 0, 0], [1, 0, 1]])
+    cluster_parity_matrix = np.array([[0, 0, 1]])
+    sectors = number_and_parity_symmetry_sectors(cluster_number_matrix, cluster_parity_matrix, norb, nelec)
+    expected_sectors = {((2,2), (0,)): [0],
+                        ((2,3), (1,)): [1],
+                        ((1,2), (1,)): [2,4,6],
+                        ((1,1), (0,)): [3],
+                        ((0,1), (1,)): [5],
+                        ((1,3), (0,)): [7],
+                        ((0,2), (0,)): [8]}
+    assert sectors == expected_sectors
+    
+    # only parities
+    norb = 4
+    nelec = (2, 3)
+    cluster_number_matrix = np.array([])
+    cluster_parity_matrix = np.array([[1, 0, 0, 1], [0, 1, 1, 0]])
+    sectors = number_and_parity_symmetry_sectors(cluster_number_matrix, cluster_parity_matrix, norb, nelec)
+    aleksey_sectors = symmetry_sectors(cluster_parity_matrix, norb, nelec)
+    expected_sectors = {((), k): v for k, v in aleksey_sectors.items()}
+    assert sectors == expected_sectors
+
+    # only numbers
+    norb = 3
+    nelec = (1, 1)
+    cluster_number_matrix = np.array([[0, 1, 1]])
+    cluster_parity_matrix = np.array([])
+    sectors = number_and_parity_symmetry_sectors(cluster_number_matrix, cluster_parity_matrix, norb, nelec)
+    expected_sectors = {((0,), ()): [0],
+                        ((1,), ()): [1,2,3,6],
+                        ((2,), ()): [4,5,7,8]}
+    assert sectors == expected_sectors
