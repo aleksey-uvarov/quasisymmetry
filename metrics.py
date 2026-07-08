@@ -12,9 +12,18 @@ from math import comb
 import matplotlib.pyplot as plt
 import bisect
 from uuid import uuid4
+from mpi4py import MPI
+from mpi4py.futures import MPIPoolExecutor
+
 
 from chemistry import load_moldata, fcidump_data, CHEMICAL_PRECISION
 from optimize_symmetries import parity_matrix_to_quasisymmetries, x_to_rotation, get_fci, commutator_cost
+from src.energy_diagnostics import (
+    coupled_energy_perturbation,
+    reference_coupled_energy_k,
+    sector_data_from_gs_pairs,
+    state_labels_for_columns,
+)
 
 
 def symmetry_sectors(parity_matrix, norb, nelec):
@@ -145,6 +154,8 @@ def selected_column_solver(A: np.ndarray, e_target, thr=1e-8, start="zero"):
 
 
 def orthogonalize_degenerate(w, V, tol=1e-10):
+    """scipy.sparse.linalg.eigsh sometimes returns non-orthogonal eigenvectors if they have
+    degenerate eigenvalues. This function rectifies that."""
     V_orth = V.copy()
 
     start = 0
@@ -178,6 +189,31 @@ def find_first_negative(f, N):
 
     return -1
 
+def solve_eigs(data):
+    # mpi4py can't pickle the rotated_h_linop, so we will be constructing it on each worker?
+    moldata = data["moldata"]
+    rotated_h = data["rotated_h"]
+    sector_bitstrings = data["sector_bitstrings"]
+    rotated_h_linop = ffsim.linear_operator(rotated_h,
+                                            norb=moldata.norb,
+                                            nelec=moldata.nelec)
+
+    h_subspace = subspace_matrix(rotated_h_linop, sector_bitstrings)
+    if data["states_per_sector"] <= h_subspace.shape[0] - 2:
+        w, v = scipy.sparse.linalg.eigsh(
+            h_subspace, which="SA", k=data["states_per_sector"])
+        v = v[:, np.argsort(w)]
+        w = np.sort(w)
+        v_orth = orthogonalize_degenerate(w, v)
+        sector_eigs = w, v_orth
+    else:
+        sector_eigs = np.linalg.eigh(h_subspace)
+
+    return {"sector_label": data["sector_label"],
+            "sector_eigs": sector_eigs,
+            "rank": MPI.COMM_WORLD.Get_rank(),
+            "hostname": MPI.Get_processor_name()}
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
@@ -189,16 +225,18 @@ if __name__=="__main__":
     parser.add_argument("--U", help="x as orbital rotation",
                         default=None)
     parser.add_argument("--states_per_sector", type=int, default=500)
-    parser.add_argument("--K_start", default="energy")
     parser.add_argument("--check_if_enough", action="store_true")
-    parser.add_argument("--born_huang", action="store_true",
-                        help="calculate 'K' by increasing the number of states per sector,"
-                             "up to --states_per_sector")
-    parser.add_argument("--min_born_huang", type=int, default=1)
-    parser.add_argument("--direct_K", action="store_true")
+    parser.add_argument(
+        "--coupled_energy_method",
+        choices=("reference", "perturbation"),
+        default="reference",
+        help="K_coupled selection: FCI-coefficient greedy (reference) or PT-screened greedy (perturbation)",
+    )
     args = parser.parse_args()
 
-    outname = "result_" + str(uuid4())[:10] + ".txt"
+    p = Path(args.molpath)
+
+    outname = "result_" + p.parts[-1] + "_" + str(uuid4())[:6] + ".txt"
     with open(outname, "a") as fp:
         fp.write(str(vars(args)) + "\n")
 
@@ -240,165 +278,140 @@ if __name__=="__main__":
 
     print("qty of sectors ", len(sectors.keys()))
 
-    print("Creating subspace Hamiltonians")
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()  # this process's ID, 0..size-1
+    size = comm.Get_size()  # total number of processes
+    print("rank and size", rank, size)
 
-    sector_hamiltonians = {}
-    for sector_label, sector_bitstrings in tqdm(sectors.items()):
-        sector_hamiltonians[sector_label] = subspace_matrix(rotated_h_linop,
-                                                            sector_bitstrings)
+    tasks = [{"moldata": moldata,
+              "rotated_h": rotated_h,
+              "states_per_sector": args.states_per_sector,
+              "sector_label": k,
+              "sector_bitstrings": v
+              }
+             for k, v in sectors.items()]
 
-    sector_gs_pairs = {}
+    sector_eigs = {}
 
-    smallest = 0
-    lowest_sector_label = None
-    print("Calculating sector eigenvalues")
-    for sector_label, h_local in tqdm(sector_hamiltonians.items()):
-        if args.states_per_sector <= h_local.shape[0] - 2:
-            w, v = scipy.sparse.linalg.eigsh(
-                h_local, which="SA", k=args.states_per_sector)
-            v = v[:, np.argsort(w)]
-            w = np.sort(w)
-            v_orth = orthogonalize_degenerate(w, v)
-            sector_gs_pairs[sector_label] = w, v_orth
-        else:
-            sector_gs_pairs[sector_label] = np.linalg.eigh(h_local)
-        if np.min(sector_gs_pairs[sector_label][0]) < smallest:
-            smallest = np.min(sector_gs_pairs[sector_label][0])
-            lowest_sector_label = sector_label
-    print("Lowest sector energy and label")
-    print(smallest, lowest_sector_label)
+    # maybe restore the old way and run it if size == 1?
+    with MPIPoolExecutor() as executor:
+        for r in executor.map(solve_eigs, tasks):
+            label = tuple(r["sector_label"])
+            sector_eigs[label]= r["sector_eigs"]
+
+
+    sector_gs_energies = []
+    for w, v in sector_eigs.items():
+        sector_gs_energies.append(np.min(v[0]))
+
+    smallest = np.min(sector_gs_energies)
+
+    # sector_dims = [len(sector_bistrings) for sector_bistrings in sectors.values()]
+    # maxdim = max(sector_dims)
+    # print("Largest subspace dimension", maxdim)
+    # with open(outname, "a") as fp:
+    #     fp.write("maxdim {0:}\n".format(maxdim))
+
     de_dec = smallest - e_fci
     print("Decoupled error ", smallest - e_fci)
     with open(outname, "a") as fp:
         fp.write("E_decoupled {0:4.6f}\n".format(smallest))
         fp.write("dE {0:4.6f}\n".format(de_dec))
-    if de_dec < 0.0016:
-        print("K = 1")
+    # if de_dec < 0.0016:
+    #     print("K = 1")
+    #     with open(outname, "a") as fp:
+    #         fp.write("K 1")
+    #     quit()
+
+    h_apply = lambda v: rotated_h_linop @ v
+
+    if args.coupled_energy_method == "perturbation":
+        print("Calculating K via PT-screened coupled-energy greedy selection")
+        sector_data = sector_data_from_gs_pairs(
+            sectors, sector_eigs, rotated_h_linop.shape[0]
+        )
+        e_coupled, k_coupled, converged, chosen_keys = coupled_energy_perturbation(
+            h_apply,
+            sector_data,
+            e_exact=e_fci,
+            tol=CHEMICAL_PRECISION,
+        )
+        print("E_coupled", e_coupled)
+        print("K", k_coupled)
+        print("converged", converged)
         with open(outname, "a") as fp:
-            fp.write("K 1")
-        quit()
+            fp.write("E_coupled {0:4.6f}\n".format(e_coupled))
+            fp.write("K {0:}\n".format(k_coupled))
+            fp.write("converged {0:}\n".format(converged))
+        # if converged:
+            # print("Sector eigenstates used (sector and excitation level):")
+            # with open(outname, "a") as fp:
+            #     for key in chosen_keys:
+            #         print(key)
+            #         fp.write(str(key) + "\n")
+        if not converged:
+            print("PT coupled-energy did not converge within chemical precision")
 
-    maxdim = np.max([h.shape[0] for h in sector_hamiltonians.values()])
-    print("Largest subspace dimension", maxdim)
-    with open(outname, "a") as fp:
-        fp.write("maxdim {0:}\n".format(maxdim))
-    try:
-        zerodim = sector_hamiltonians[tuple([0] * parity_matrix.shape[0])].shape[0]
-        print("Zero parity subspace dimension", zerodim)
-    except KeyError:
-        print([(k, v.shape[0]) for k, v in sector_hamiltonians.items()])
+    elif args.coupled_energy_method == "reference":
 
-    full_space_vectors = []
-    for k, v in sectors.items():
-        full_space_vectors_in_sector = np.zeros((rotated_h_linop.shape[0],
-                                                 sector_gs_pairs[k][0].shape[0]),
-                                                dtype="complex")
-        full_space_vectors_in_sector[v, :] = sector_gs_pairs[k][1]
-        full_space_vectors.append(full_space_vectors_in_sector)
+        print("Calculating K directly from FCI (reference wavefunction)")
 
+        full_space_vectors = []
+        for k, v in sectors.items():
+            full_space_vectors_in_sector = np.zeros((rotated_h_linop.shape[0],
+                                                     sector_eigs[k][0].shape[0]),
+                                                    dtype="complex")
+            full_space_vectors_in_sector[v, :] = sector_eigs[k][1]
+            full_space_vectors.append(full_space_vectors_in_sector)
+        full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
 
-    full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
-
-
-
-    if args.direct_K:
-        print("Calculating K directly from FCI")
-        coefficients = full_space_vectors_cat.T.conj() @ rotated_fcivec
-        weights_order = np.argsort(abs(coefficients))[::-1]
-        projected_fcivec = full_space_vectors_cat @ coefficients
-        projected_fcivec /= np.linalg.norm(projected_fcivec)
-        e_full = projected_fcivec.T.conj() @ rotated_h_linop @ projected_fcivec
-        print(e_full)
-        if e_full > e_fci + CHEMICAL_PRECISION:
-            print(e_full)
+        k_min, e_coupled, converged, weights_order = reference_coupled_energy_k(
+            h_apply,
+            full_space_vectors_cat,
+            rotated_fcivec,
+            e_fci,
+            chemical_precision=CHEMICAL_PRECISION,
+        )
+        print("E_coupled (full projection)", e_coupled)
+        if k_min is None:
             with open(outname, "a") as fp:
-                fp.write("Not enough states per sector")
+                fp.write("coupled_energy_method reference\n")
+                fp.write("Not enough states per sector\n")
             print("Not enough states per sector")
             quit()
 
-        def f(K):
-            compressed_coeffs = np.zeros_like(coefficients, dtype="complex")
-            compressed_coeffs[weights_order[:K]] = coefficients[weights_order[:K]]
-            compressed_coeffs /= np.linalg.norm(compressed_coeffs)
-            compressed_fcivec = full_space_vectors_cat @ compressed_coeffs
-            e_K = compressed_fcivec.T.conj() @ rotated_h_linop @ compressed_fcivec
-            return (e_K - e_fci - CHEMICAL_PRECISION).real
+        print("K ", k_min)
+        with open(outname, "a") as fp:
+            fp.write("K {0:}\n".format(k_min))
 
-        K_min = find_first_negative(f, full_space_vectors_cat.shape[1])
-        if K_min < full_space_vectors_cat.shape[1] and K_min != -1:
-            print("K ", K_min)
-            with open(outname, "a") as fp:
-                fp.write("K {0:}\n".format(K_min))
+        all_state_labels = state_labels_for_columns(sector_eigs)
 
-            all_state_labels = []
-            for sector_label, sector_gs in tqdm(sector_gs_pairs.items()):
-                labels = [(sector_label, i) for i in range(sector_gs[1].shape[1])]
-                all_state_labels.extend(labels)
-            print("Sector eigenstates used (sector and excitation level):")
-            with open(outname, "a") as fp:
-                for i in range(K_min):
-                    print(all_state_labels[weights_order[i]])
-                    fp.write(str(all_state_labels[weights_order[i]]) + "\n")
-            quit()
-        else:
-            print("not enough?")
-            quit()
+        # with open(outname, "a") as fp:
+        #     for i in range(k_min):
+        #         print(all_state_labels[weights_order[i]])
+        #         fp.write(str(all_state_labels[weights_order[i]]) + "\n")
 
-    if args.born_huang:
-        print("Picking L states per sector and finding the energy")
-        for L in range(args.min_born_huang, args.states_per_sector + 1):
-            print("L = {0:}".format(L), end=" ")
-            vectors_stacked = np.concatenate(
-                [w[:, :L] for w in full_space_vectors],
-                                             axis=1)
-            print("dim = {0:}".format(vectors_stacked.shape[1]), end=" ")
-            # subspace_op = scipy.sparse.linalg.LinearOperator(
-            #     (vectors_stacked.shape[1], vectors_stacked.shape[1]),
-            #     matvec=lambda x: vectors_stacked.T.conj() @ rotated_h_linop @ vectors_stacked @ x,
-            # )
-            subspace_op = vectors_stacked.T.conj() @ rotated_h_linop @ vectors_stacked
-            w, v = scipy.sparse.linalg.eigsh(subspace_op, which="SA", k=1)
-            print("dE ", w - e_fci)
-            if w[0] < e_fci + CHEMICAL_PRECISION:
-                full_space_solution = vectors_stacked @ v[:, 0]
-                eeeee = full_space_solution.T.conj() @ rotated_h_linop @ full_space_solution
-                print(eeeee)
-                print(np.linalg.norm(full_space_solution))
-                print("{0:} states per sector is enough".format(L))
-                abs_coeffs_sorted = np.argsort(np.abs(v[:, 0]**2))[::-1]
-                for k in range(1, v.shape[0]):
-                    compressed_vector = np.zeros_like(v[:, 0], dtype="complex")
-                    compressed_vector[abs_coeffs_sorted[:k]] = v[abs_coeffs_sorted[:k], 0]
-                    compressed_vector /= np.linalg.norm(compressed_vector)
-                    e_compressed = compressed_vector.T.conj() @ subspace_op @ compressed_vector
-                    print(e_compressed - e_fci)
-                    if e_compressed - e_fci < 0.0016:
-                        print("K = {0:}".format(k))
-                        quit()
-                quit()
-        else:
-            print("Chemical accuracy not reached ")
-            quit()
+        chosen_keys = [all_state_labels[weights_order[i]] for i in range(k_min)]
 
-    h_subspace = full_space_vectors_cat.T.conj() @ rotated_h_linop @ full_space_vectors_cat
+    print("Sector eigenstates used (sector and excitation level):")
+    with open(outname, "a") as fp:
+        fp.write("Sector eigenstates used (sector and excitation level):\n")
+        for key in chosen_keys:
+            print(key)
+            fp.write(str(key) + "\n")
 
-    if args.check_if_enough:
-        w_subspace, _ = scipy.sparse.linalg.eigsh(h_subspace, k=1, which="SA")
-        print("Coupled energy", w_subspace)
-        if w_subspace - e_fci > 0.0016:
-            print("Not enough states to reach chemical accuracy, increase states_per_sector")
-            quit()
-
-    if args.K_start == "zero":
-        print("Using the first sector for the start")
-        print(list(sectors.keys())[0])
-        K, v = selected_column_solver(h_subspace, e_fci + 0.0016, start="zero")
-    elif args.K_start == "energy":
-        K, v = selected_column_solver(h_subspace, e_fci + 0.0016, start="energy")
-    else:
-        raise ValueError()
-    print("K ", K)
-    # print("variance ", v.T.conj() @ h_subspace @ h_subspace @ v - (v.T.conj() @ h_subspace @ v) ** 2)
+        unique_sectors_used = set([w[0] for w in chosen_keys])
+        total_dim_of_relevant_sectors = 0
+        print("Relevant sectors and their dimensions:")
+        fp.write("Relevant sectors and their dimensions:\n")
+        for s in unique_sectors_used:
+            print(s, len(sectors[s]))
+            fp.write(str(s) + " " + str(len(sectors[s])) + "\n")
+            total_dim_of_relevant_sectors += len(sectors[s])
+        print("{0:} sectors in total".format(len(unique_sectors_used)))
+        fp.write("{0:} sectors in total\n".format(len(unique_sectors_used)))
+        print("Total dimension: {0:}".format(total_dim_of_relevant_sectors))
+        fp.write("Total dimension: {0:}\n".format(total_dim_of_relevant_sectors))
 
 
 
