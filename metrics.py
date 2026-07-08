@@ -154,6 +154,8 @@ def selected_column_solver(A: np.ndarray, e_target, thr=1e-8, start="zero"):
 
 
 def orthogonalize_degenerate(w, V, tol=1e-10):
+    """scipy.sparse.linalg.eigsh sometimes returns non-orthogonal eigenvectors if they have
+    degenerate eigenvalues. This function rectifies that."""
     V_orth = V.copy()
 
     start = 0
@@ -192,14 +194,6 @@ def solve_eigs(data):
     moldata = data["moldata"]
     rotated_h = data["rotated_h"]
     sector_bitstrings = data["sector_bitstrings"]
-    # if args.U is not None:
-    #     x = np.loadtxt(args.U, comments=["#", "{"])
-    #     U = x_to_rotation(x, moldata.norb)
-    # else:
-    #     U = np.eye(moldata.norb)
-    #     x = np.zeros(comb(moldata.norb, 2))
-    #
-    # rotated_h = moldata.hamiltonian.rotated(U)
     rotated_h_linop = ffsim.linear_operator(rotated_h,
                                             norb=moldata.norb,
                                             nelec=moldata.nelec)
@@ -284,14 +278,10 @@ if __name__=="__main__":
 
     print("qty of sectors ", len(sectors.keys()))
 
-    # print("Creating subspace Hamiltonians")
-
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()  # this process's ID, 0..size-1
     size = comm.Get_size()  # total number of processes
     print("rank and size", rank, size)
-
-    # solver = lambda x: solve_eigs(rotated_h_linop, x)
 
     tasks = [{"moldata": moldata,
               "rotated_h": rotated_h,
@@ -303,83 +293,36 @@ if __name__=="__main__":
 
     sector_eigs = {}
 
-
+    # maybe restore the old way and run it if size == 1?
     with MPIPoolExecutor() as executor:
         for r in executor.map(solve_eigs, tasks):
-            print(r["sector_label"], r["sector_eigs"][0][:2], r["hostname"], r["rank"])
             label = tuple(r["sector_label"])
             sector_eigs[label]= r["sector_eigs"]
 
 
-    # sector_hamiltonians = {}
-    # for sector_label, sector_bitstrings in tqdm(sectors.items()):
-    #     sector_hamiltonians[sector_label] = subspace_matrix(rotated_h_linop,
-    #                                                         sector_bitstrings)
-
-
-
-
-
-
-    # smallest = 0
-    # lowest_sector_label = None
-    # print("Calculating sector eigenvalues")
-    # for sector_label, h_local in tqdm(sector_hamiltonians.items()):
-    #     if args.states_per_sector <= h_local.shape[0] - 2:
-    #         w, v = scipy.sparse.linalg.eigsh(
-    #             h_local, which="SA", k=args.states_per_sector)
-    #         v = v[:, np.argsort(w)]
-    #         w = np.sort(w)
-    #         v_orth = orthogonalize_degenerate(w, v)
-    #         sector_gs_pairs[sector_label] = w, v_orth
-    #     else:
-    #         sector_gs_pairs[sector_label] = np.linalg.eigh(h_local)
-    #     if np.min(sector_gs_pairs[sector_label][0]) < smallest:
-    #         smallest = np.min(sector_gs_pairs[sector_label][0])
-    #         lowest_sector_label = sector_label
-    # print("Lowest sector energy and label")
-    # print(smallest, lowest_sector_label)
-
     sector_gs_energies = []
     for w, v in sector_eigs.items():
-        sector_gs_energies.append(np.min(w))
+        sector_gs_energies.append(np.min(v[0]))
 
     smallest = np.min(sector_gs_energies)
+
+    # sector_dims = [len(sector_bistrings) for sector_bistrings in sectors.values()]
+    # maxdim = max(sector_dims)
+    # print("Largest subspace dimension", maxdim)
+    # with open(outname, "a") as fp:
+    #     fp.write("maxdim {0:}\n".format(maxdim))
 
     de_dec = smallest - e_fci
     print("Decoupled error ", smallest - e_fci)
     with open(outname, "a") as fp:
         fp.write("E_decoupled {0:4.6f}\n".format(smallest))
         fp.write("dE {0:4.6f}\n".format(de_dec))
-    if de_dec < 0.0016:
-        print("K = 1")
-        with open(outname, "a") as fp:
-            fp.write("K 1")
-        quit()
+    # if de_dec < 0.0016:
+    #     print("K = 1")
+    #     with open(outname, "a") as fp:
+    #         fp.write("K 1")
+    #     quit()
 
-    # quit()
-
-    # maxdim = np.max([h.shape[0] for h in sector_hamiltonians.values()])
-    maxdim = [len(sector_bistrings) for sector_bistrings in sectors.values()]
-    print("Largest subspace dimension", maxdim)
-    with open(outname, "a") as fp:
-        fp.write("maxdim {0:}\n".format(maxdim))
-    # try:
-    #     zerodim = sector_hamiltonians[tuple([0] * parity_matrix.shape[0])].shape[0]
-    #     print("Zero parity subspace dimension", zerodim)
-    # except KeyError:
-    #     print([(k, v.shape[0]) for k, v in sector_hamiltonians.items()])
-
-    full_space_vectors = []
-    for k, v in sectors.items():
-        full_space_vectors_in_sector = np.zeros((rotated_h_linop.shape[0],
-                                                 sector_eigs[k][0].shape[0]),
-                                                dtype="complex")
-        full_space_vectors_in_sector[v, :] = sector_eigs[k][1]
-        full_space_vectors.append(full_space_vectors_in_sector)
-
-
-    full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
     h_apply = lambda v: rotated_h_linop @ v
 
     if args.coupled_energy_method == "perturbation":
@@ -397,51 +340,78 @@ if __name__=="__main__":
         print("K", k_coupled)
         print("converged", converged)
         with open(outname, "a") as fp:
-            fp.write("coupled_energy_method perturbation\n")
             fp.write("E_coupled {0:4.6f}\n".format(e_coupled))
             fp.write("K {0:}\n".format(k_coupled))
             fp.write("converged {0:}\n".format(converged))
-        if converged:
-            print("Sector eigenstates used (sector and excitation level):")
-            with open(outname, "a") as fp:
-                for key in chosen_keys:
-                    print(key)
-                    fp.write(str(key) + "\n")
-        else:
+        # if converged:
+            # print("Sector eigenstates used (sector and excitation level):")
+            # with open(outname, "a") as fp:
+            #     for key in chosen_keys:
+            #         print(key)
+            #         fp.write(str(key) + "\n")
+        if not converged:
             print("PT coupled-energy did not converge within chemical precision")
-        quit()
 
-    print("Calculating K directly from FCI (reference wavefunction)")
-    k_min, e_coupled, converged, weights_order = reference_coupled_energy_k(
-        h_apply,
-        full_space_vectors_cat,
-        rotated_fcivec,
-        e_fci,
-        chemical_precision=CHEMICAL_PRECISION,
-    )
-    print("E_coupled (full projection)", e_coupled)
-    if k_min is None:
+    elif args.coupled_energy_method == "reference":
+
+        print("Calculating K directly from FCI (reference wavefunction)")
+
+        full_space_vectors = []
+        for k, v in sectors.items():
+            full_space_vectors_in_sector = np.zeros((rotated_h_linop.shape[0],
+                                                     sector_eigs[k][0].shape[0]),
+                                                    dtype="complex")
+            full_space_vectors_in_sector[v, :] = sector_eigs[k][1]
+            full_space_vectors.append(full_space_vectors_in_sector)
+        full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
+
+        k_min, e_coupled, converged, weights_order = reference_coupled_energy_k(
+            h_apply,
+            full_space_vectors_cat,
+            rotated_fcivec,
+            e_fci,
+            chemical_precision=CHEMICAL_PRECISION,
+        )
+        print("E_coupled (full projection)", e_coupled)
+        if k_min is None:
+            with open(outname, "a") as fp:
+                fp.write("coupled_energy_method reference\n")
+                fp.write("Not enough states per sector\n")
+            print("Not enough states per sector")
+            quit()
+
+        print("K ", k_min)
         with open(outname, "a") as fp:
-            fp.write("coupled_energy_method reference\n")
-            fp.write("Not enough states per sector\n")
-        print("Not enough states per sector")
-        quit()
+            fp.write("K {0:}\n".format(k_min))
 
-    print("K ", k_min)
-    with open(outname, "a") as fp:
-        fp.write("coupled_energy_method reference\n")
-        fp.write("K {0:}\n".format(k_min))
+        all_state_labels = state_labels_for_columns(sector_eigs)
 
-    all_state_labels = state_labels_for_columns(sector_eigs)
+        # with open(outname, "a") as fp:
+        #     for i in range(k_min):
+        #         print(all_state_labels[weights_order[i]])
+        #         fp.write(str(all_state_labels[weights_order[i]]) + "\n")
+
+        chosen_keys = [all_state_labels[weights_order[i]] for i in range(k_min)]
+
     print("Sector eigenstates used (sector and excitation level):")
     with open(outname, "a") as fp:
-        for i in range(k_min):
-            print(all_state_labels[weights_order[i]])
-            fp.write(str(all_state_labels[weights_order[i]]) + "\n")
+        fp.write("Sector eigenstates used (sector and excitation level):\n")
+        for key in chosen_keys:
+            print(key)
+            fp.write(str(key) + "\n")
 
-    used_states = [all_state_labels[weights_order[i]] for i in range(k_min)]
-    unique_sectors_used = set([w[0] for w in used_states])
-    print("# of sectors {0:}".format(len(unique_sectors_used)))
+        unique_sectors_used = set([w[0] for w in chosen_keys])
+        total_dim_of_relevant_sectors = 0
+        print("Relevant sectors and their dimensions:")
+        fp.write("Relevant sectors and their dimensions:\n")
+        for s in unique_sectors_used:
+            print(s, len(sectors[s]))
+            fp.write(str(s) + " " + str(len(sectors[s])) + "\n")
+            total_dim_of_relevant_sectors += len(sectors[s])
+        print("{0:} sectors in total".format(len(unique_sectors_used)))
+        fp.write("{0:} sectors in total\n".format(len(unique_sectors_used)))
+        print("Total dimension: {0:}".format(total_dim_of_relevant_sectors))
+        fp.write("Total dimension: {0:}\n".format(total_dim_of_relevant_sectors))
 
 
 
