@@ -30,14 +30,15 @@ def commutator_cost_v2(moldata: ffsim.MolecularData,
             term1 = h @ (s @ rotated_state)
             term2 = s @ h_on_rotate_state
             commutator_on_state = term1 - term2
-            total_nc += np.linalg.norm(commutator_on_state)**2
+            total_nc += np.vdot(commutator_on_state, commutator_on_state).real
         return total_nc
     return f
 
-# this version of variance_cost works for arbitrary symmetry ops, not only parities/idempotent ops
-def variance_cost_beyond_parities(moldata: ffsim.MolecularData,
+# this version of variance_cost works for arbitrary symmetry ops, not only parities/idempotent ops.
+# Set only_parities=True for efficient idempotent-only version
+def variance_cost_general(moldata: ffsim.MolecularData,
                     symmetries: list[scipy.sparse.linalg.LinearOperator],
-                    reference_state: np.ndarray) -> Callable:
+                    reference_state: np.ndarray, idempotent=False) -> Callable:
     def f(x: np.ndarray) -> float:
         U = x_to_rotation(x, moldata.norb)
         rotated_state = ffsim.apply_orbital_rotation(reference_state,
@@ -46,12 +47,17 @@ def variance_cost_beyond_parities(moldata: ffsim.MolecularData,
                                                      moldata.nelec)
         total_var = 0
         for s in symmetries:
-            total_var += (reference_state.T.conj() @ (s @ (s @ reference_state)) - (reference_state.T.conj() @ (s @ reference_state)) ** 2).real
+            if idempotent: # use simplified expression
+                total_var += 1 - ((rotated_state.T.conj() @ s @ rotated_state)**2).real
+            else:
+                total_var += (reference_state.T.conj() @ (s @ (s @ reference_state)) - (reference_state.T.conj() @ (s @ reference_state)) ** 2).real
         return total_var
     return f
 
+# eigenvalue equation-based cost function
+# Set only_parities=True for efficient idempotent-only version
 def eval_eq_cost(symmetries: list, evals: list,
-                    reference_state: np.ndarray, norb:int, nelec:int) -> Callable:
+                    reference_state: np.ndarray, norb:int, nelec:int, idempotent=False) -> Callable:
     if len(symmetries) != len(evals):
         raise ValueError("len(evals) must match len(symmetries)")
     def f(x):
@@ -62,7 +68,11 @@ def eval_eq_cost(symmetries: list, evals: list,
                                                      nelec)
         total = 0
         for i in range(len(symmetries)):
-            total += np.linalg.norm(symmetries[i] @ rotated_state - evals[i] * rotated_state)**2
+            if idempotent: # use simplified expression
+                total += evals[i] + (1 - 2 * evals[i]) * np.vdot(rotated_state, symmetries[i] @ rotated_state).real
+            else:
+                vec = symmetries[i] @ rotated_state - evals[i] * rotated_state
+                total += np.vdot(vec, vec).real 
         return total
     return f
 
@@ -128,13 +138,3 @@ def get_heatmap_data_eval_eq_score(ref_state, norb, diag_operators, off_diag_ope
             eval_scores[i, j] = np.linalg.norm(op_ij @ ref_state - off_diag_eval * ref_state)**2
 
     return eval_scores
-
-# Template to design alternative cost functions:
-
-# def build_other_cost_function(moldata: ffsim.MolecularData,
-#                    symmetries: list,
-#                    reference_state: np.ndarray) -> Callable:
-#
-# def f(x):
-#       # ...
-#    return f
