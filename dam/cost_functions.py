@@ -11,6 +11,8 @@ def x_to_rotation(x, norb):
     rotation_generator -= rotation_generator.T
     return scipy.linalg.expm(rotation_generator)
 
+# this version of commutator_cost is slightly more efficient as h_on_rotate_state
+# is computed only once
 def commutator_cost_v2(moldata: ffsim.MolecularData,
                     symmetries: list,
                     reference_state: np.ndarray) -> Callable:
@@ -30,6 +32,22 @@ def commutator_cost_v2(moldata: ffsim.MolecularData,
             commutator_on_state = term1 - term2
             total_nc += np.linalg.norm(commutator_on_state)**2
         return total_nc
+    return f
+
+# this version of variance_cost works for arbitrary symmetry ops, not only parities/idempotent ops
+def variance_cost_beyond_parities(moldata: ffsim.MolecularData,
+                    symmetries: list[scipy.sparse.linalg.LinearOperator],
+                    reference_state: np.ndarray) -> Callable:
+    def f(x: np.ndarray) -> float:
+        U = x_to_rotation(x, moldata.norb)
+        rotated_state = ffsim.apply_orbital_rotation(reference_state,
+                                                     U,
+                                                     moldata.norb,
+                                                     moldata.nelec)
+        total_var = 0
+        for s in symmetries:
+            total_var += (reference_state.T.conj() @ (s @ (s @ reference_state)) - (reference_state.T.conj() @ (s @ reference_state)) ** 2).real
+        return total_var
     return f
 
 def eval_eq_cost(symmetries: list, evals: list,
@@ -76,6 +94,20 @@ def get_heatmap_data_nc_score(h, ref_state, norb, diag_operators, off_diag_opera
             nc_scores[i, j] = np.linalg.norm(commutator_on_state)**2
 
     return nc_scores
+
+def get_heatmap_data_variance_score(ref_state, norb, diag_operators, off_diag_operators, upscale_factor=1):
+    variance_scores = np.zeros((norb, norb))
+
+    for i in range(norb):
+        variance_scores[i, i] = upscale_factor * ( (ref_state.T.conj() @ (diag_operators[i] @ (diag_operators[i] @ ref_state))) - ((ref_state.T.conj() @ (diag_operators[i] @ ref_state)) ** 2).real)
+
+    for i in range(norb):
+        for j in range(i + 1, norb):
+            flat_index = i * norb - i * (i + 1) // 2 + j - i - 1
+            op_ij = off_diag_operators[flat_index]
+            variance_scores[i, j] = (ref_state.T.conj() @ (op_ij @ (op_ij @ ref_state)) - (ref_state.T.conj() @ (op_ij @ ref_state)) ** 2).real
+
+    return variance_scores
 
 def get_heatmap_data_eval_eq_score(ref_state, norb, diag_operators, off_diag_operators, diag_evals, off_diag_evals, upscale_factor=1):
     """Returns matrix of eigenvalue equation-based scores, with entries ||(quasisymmetry operator - eval * I)|Ψ>||²"""

@@ -1,0 +1,3 @@
+score_type,example_cluster_matrices_index,bond_length,hoh_angle_deg,output_file
+variance,0,1.,30,variance_results.txt
+variance,1,1.,30,variance_results.txt
