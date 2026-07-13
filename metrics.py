@@ -11,6 +11,7 @@ import numpy as np
 import scipy
 import scipy.sparse.linalg
 from tqdm import tqdm
+<<<<<<< HEAD
 
 try:
     import ffsim
@@ -93,6 +94,28 @@ def subspace_matrix(A, support):
         A_sub[:, i] = y[support]
 
     return A_sub
+=======
+from pathlib import Path
+from itertools import product
+from math import comb
+import matplotlib.pyplot as plt
+import bisect
+from uuid import uuid4
+from mpi4py import MPI
+from mpi4py.futures import MPIPoolExecutor
+import time
+
+
+from chemistry import load_moldata, fcidump_data, CHEMICAL_PRECISION
+from optimize_symmetries import parity_matrix_to_quasisymmetries, x_to_rotation, get_fci, commutator_cost
+from src.energy_diagnostics import (
+    coupled_energy_perturbation,
+    reference_coupled_energy_k,
+    sector_data_from_gs_pairs,
+    state_labels_for_columns,
+)
+from src.sector_utils import symmetry_sectors, subspace_matrix
+>>>>>>> f09fee37df2e44a547fbf022c745bee435e5c8cf
 
 
 def submatrix_eigenvalues_to_target(A: np.ndarray, e_target: float):
@@ -166,6 +189,8 @@ def selected_column_solver(A: np.ndarray, e_target, thr=1e-8, start="zero"):
 
 
 def orthogonalize_degenerate(w, V, tol=1e-10):
+    """scipy.sparse.linalg.eigsh sometimes returns non-orthogonal eigenvectors if they have
+    degenerate eigenvalues. This function rectifies that."""
     V_orth = V.copy()
 
     start = 0
@@ -199,10 +224,36 @@ def find_first_negative(f, N):
 
     return -1
 
+def solve_eigs(data):
+    # mpi4py can't pickle the rotated_h_linop, so we will be constructing it on each worker?
+    moldata = data["moldata"]
+    rotated_h = data["rotated_h"]
+    sector_bitstrings = data["sector_bitstrings"]
+    rotated_h_linop = ffsim.linear_operator(rotated_h,
+                                            norb=moldata.norb,
+                                            nelec=moldata.nelec)
+
+    h_subspace = subspace_matrix(rotated_h_linop, sector_bitstrings)
+    if data["states_per_sector"] <= h_subspace.shape[0] - 2:
+        w, v = scipy.sparse.linalg.eigsh(
+            h_subspace, which="SA", k=data["states_per_sector"])
+        v = v[:, np.argsort(w)]
+        w = np.sort(w)
+        v_orth = orthogonalize_degenerate(w, v)
+        sector_eigs = w, v_orth
+    else:
+        sector_eigs = np.linalg.eigh(h_subspace)
+
+    return {"sector_label": data["sector_label"],
+            "sector_eigs": sector_eigs,
+            "rank": MPI.COMM_WORLD.Get_rank(),
+            "hostname": MPI.Get_processor_name()}
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(
         description="Calculate the metrics")
+<<<<<<< HEAD
     parser.add_argument("molpath",
         help="path to the Hamiltonian (PySCF .chk or .FCIDUMP)")
     parser.add_argument("parity_matrix",
@@ -226,6 +277,9 @@ if __name__=="__main__":
                         help="optional orbital reordering before DMRG")
     parser.add_argument("--entanglement", action="store_true",
                         help="with --solver dmrg, also report orbital entropies")
+=======
+    parser.add_argument("input_data", help="JSON you got from optimize_symmetries.py")
+>>>>>>> f09fee37df2e44a547fbf022c745bee435e5c8cf
     parser.add_argument("--states_per_sector", type=int, default=500)
     parser.add_argument("--check_if_enough", action="store_true")
     parser.add_argument(
@@ -236,12 +290,12 @@ if __name__=="__main__":
     )
     args = parser.parse_args()
 
-    p = Path(args.molpath)
+    with open(args.input_data, "r") as fp:
+        input_data = json.load(fp)
 
-    outname = "result_" + p.parts[-1] + "_" + str(uuid4())[:6] + ".txt"
-    with open(outname, "a") as fp:
-        fp.write(str(vars(args)) + "\n")
+    p = Path(input_data["molpath"])
 
+<<<<<<< HEAD
     parity_matrix = np.loadtxt(args.parity_matrix, dtype=int)
 
     if args.solver == "dmrg":
@@ -319,6 +373,18 @@ if __name__=="__main__":
     moldata = load_moldata(args.molpath)
     dumpdata = fcidump_data(args.molpath)
 
+=======
+    outname = ("metrics_" +
+               p.parts[-1] + "_" + str(uuid4())[:8] + ".json")
+    out_data = {}
+    out_data["args"] = vars(args)
+    out_data["OO_data"] = input_data
+
+    moldata = load_moldata(input_data["molpath"])
+    dumpdata = fcidump_data(input_data["molpath"])
+
+    parity_matrix = np.loadtxt(input_data["parity"], dtype=int)
+>>>>>>> f09fee37df2e44a547fbf022c745bee435e5c8cf
     symmetries = parity_matrix_to_quasisymmetries(parity_matrix,
                                                   moldata.norb,
                                                   moldata.nelec)
@@ -327,12 +393,8 @@ if __name__=="__main__":
 
     sectors = symmetry_sectors(parity_matrix, moldata.norb, moldata.nelec)
 
-    if args.U is not None:
-        x = np.loadtxt(args.U, comments=["#", "{"])
-        U = x_to_rotation(x, moldata.norb)
-    else:
-        U = np.eye(moldata.norb)
-        x = np.zeros(comb(moldata.norb, 2))
+    x = np.array(input_data["rotation"])
+    U = x_to_rotation(x, moldata.norb)
 
     rotated_h = moldata.hamiltonian.rotated(U)
     rotated_h_linop = ffsim.linear_operator(rotated_h,
@@ -340,84 +402,59 @@ if __name__=="__main__":
                                             nelec=moldata.nelec)
 
     e_fci, fcivec = get_fci(dumpdata)
+<<<<<<< HEAD
     print("reference (fci) ", e_fci)
     with open(outname, "a") as fp:
         fp.write("solver fci\n")
         fp.write("E_FCI {0:4.6f}\n".format(e_fci))
+=======
+    print("FCI ", e_fci)
+    out_data["E_FCI"] = e_fci
+>>>>>>> f09fee37df2e44a547fbf022c745bee435e5c8cf
     rotated_fcivec = ffsim.apply_orbital_rotation(fcivec, U, norb=moldata.norb,
                                                   nelec=moldata.nelec)
 
-    f = commutator_cost(moldata, symmetries, fcivec)
-    print("fci NC cost", f(x))
-    with open(outname, "a") as fp:
-        fp.write("fci NC cost {0:4.6f}\n".format(f(x)))
-
     print("qty of sectors ", len(sectors.keys()))
 
-    print("Creating subspace Hamiltonians")
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()  # this process's ID, 0..size-1
+    size = comm.Get_size()  # total number of processes
+    print("rank and size", rank, size)
 
-    sector_hamiltonians = {}
-    for sector_label, sector_bitstrings in tqdm(sectors.items()):
-        sector_hamiltonians[sector_label] = subspace_matrix(rotated_h_linop,
-                                                            sector_bitstrings)
+    tasks = [{"moldata": moldata,
+              "rotated_h": rotated_h,
+              "states_per_sector": args.states_per_sector,
+              "sector_label": k,
+              "sector_bitstrings": v
+              }
+             for k, v in sectors.items()]
 
-    sector_gs_pairs = {}
+    sector_eigs = {}
 
-    smallest = 0
-    lowest_sector_label = None
-    print("Calculating sector eigenvalues")
-    for sector_label, h_local in tqdm(sector_hamiltonians.items()):
-        if args.states_per_sector <= h_local.shape[0] - 2:
-            w, v = scipy.sparse.linalg.eigsh(
-                h_local, which="SA", k=args.states_per_sector)
-            v = v[:, np.argsort(w)]
-            w = np.sort(w)
-            v_orth = orthogonalize_degenerate(w, v)
-            sector_gs_pairs[sector_label] = w, v_orth
-        else:
-            sector_gs_pairs[sector_label] = np.linalg.eigh(h_local)
-        if np.min(sector_gs_pairs[sector_label][0]) < smallest:
-            smallest = np.min(sector_gs_pairs[sector_label][0])
-            lowest_sector_label = sector_label
-    print("Lowest sector energy and label")
-    print(smallest, lowest_sector_label)
+    # maybe restore the old way and run it if size == 1?
+    with MPIPoolExecutor() as executor:
+        for r in executor.map(solve_eigs, tasks):
+            label = tuple(r["sector_label"])
+            sector_eigs[label]= r["sector_eigs"]
+
+
+    sector_gs_energies = []
+    for w, v in sector_eigs.items():
+        sector_gs_energies.append(np.min(v[0]))
+
+    smallest = np.min(sector_gs_energies)
+
     de_dec = smallest - e_fci
     print("Decoupled error ", smallest - e_fci)
-    with open(outname, "a") as fp:
-        fp.write("E_decoupled {0:4.6f}\n".format(smallest))
-        fp.write("dE {0:4.6f}\n".format(de_dec))
-    if de_dec < 0.0016:
-        print("K = 1")
-        with open(outname, "a") as fp:
-            fp.write("K 1")
-        quit()
+    out_data["E_decoupled"] = smallest
+    out_data["dE"] = de_dec
 
-    maxdim = np.max([h.shape[0] for h in sector_hamiltonians.values()])
-    print("Largest subspace dimension", maxdim)
-    with open(outname, "a") as fp:
-        fp.write("maxdim {0:}\n".format(maxdim))
-    try:
-        zerodim = sector_hamiltonians[tuple([0] * parity_matrix.shape[0])].shape[0]
-        print("Zero parity subspace dimension", zerodim)
-    except KeyError:
-        print([(k, v.shape[0]) for k, v in sector_hamiltonians.items()])
-
-    full_space_vectors = []
-    for k, v in sectors.items():
-        full_space_vectors_in_sector = np.zeros((rotated_h_linop.shape[0],
-                                                 sector_gs_pairs[k][0].shape[0]),
-                                                dtype="complex")
-        full_space_vectors_in_sector[v, :] = sector_gs_pairs[k][1]
-        full_space_vectors.append(full_space_vectors_in_sector)
-
-
-    full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
     h_apply = lambda v: rotated_h_linop @ v
 
     if args.coupled_energy_method == "perturbation":
         print("Calculating K via PT-screened coupled-energy greedy selection")
         sector_data = sector_data_from_gs_pairs(
-            sectors, sector_gs_pairs, rotated_h_linop.shape[0]
+            sectors, sector_eigs, rotated_h_linop.shape[0]
         )
         e_coupled, k_coupled, converged, chosen_keys = coupled_energy_perturbation(
             h_apply,
@@ -428,50 +465,63 @@ if __name__=="__main__":
         print("E_coupled", e_coupled)
         print("K", k_coupled)
         print("converged", converged)
-        with open(outname, "a") as fp:
-            fp.write("coupled_energy_method perturbation\n")
-            fp.write("E_coupled {0:4.6f}\n".format(e_coupled))
-            fp.write("K {0:}\n".format(k_coupled))
-            fp.write("converged {0:}\n".format(converged))
-        if converged:
-            print("Sector eigenstates used (sector and excitation level):")
-            with open(outname, "a") as fp:
-                for key in chosen_keys:
-                    print(key)
-                    fp.write(str(key) + "\n")
-        else:
+        out_data["E_coupled"] = e_coupled
+        out_data["K"] = k_coupled
+        out_data["converged"] = converged
+        if not converged:
             print("PT coupled-energy did not converge within chemical precision")
-        quit()
 
-    print("Calculating K directly from FCI (reference wavefunction)")
-    k_min, e_coupled, converged, weights_order = reference_coupled_energy_k(
-        h_apply,
-        full_space_vectors_cat,
-        rotated_fcivec,
-        e_fci,
-        chemical_precision=CHEMICAL_PRECISION,
-    )
-    print("E_coupled (full projection)", e_coupled)
-    if k_min is None:
-        with open(outname, "a") as fp:
-            fp.write("coupled_energy_method reference\n")
-            fp.write("Not enough states per sector\n")
-        print("Not enough states per sector")
-        quit()
+    elif args.coupled_energy_method == "reference":
 
-    print("K ", k_min)
-    with open(outname, "a") as fp:
-        fp.write("coupled_energy_method reference\n")
-        fp.write("K {0:}\n".format(k_min))
+        print("Calculating K directly from FCI (reference wavefunction)")
 
-    all_state_labels = state_labels_for_columns(sector_gs_pairs)
+        full_space_vectors = []
+        for k, v in sectors.items():
+            full_space_vectors_in_sector = np.zeros((rotated_h_linop.shape[0],
+                                                     sector_eigs[k][0].shape[0]),
+                                                    dtype="complex")
+            full_space_vectors_in_sector[v, :] = sector_eigs[k][1]
+            full_space_vectors.append(full_space_vectors_in_sector)
+        full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
+
+        k_min, e_coupled, converged, weights_order = reference_coupled_energy_k(
+            h_apply,
+            full_space_vectors_cat,
+            rotated_fcivec,
+            e_fci,
+            chemical_precision=CHEMICAL_PRECISION,
+        )
+        print("E_coupled (full projection)", e_coupled)
+        out_data["K"] = k_min
+        if k_min is None:
+            print("Not enough states per sector")
+            quit()
+
+        print("K ", k_min)
+
+        all_state_labels = state_labels_for_columns(sector_eigs)
+
+        chosen_keys = [all_state_labels[weights_order[i]] for i in range(k_min)]
+
     print("Sector eigenstates used (sector and excitation level):")
-    with open(outname, "a") as fp:
-        for i in range(k_min):
-            print(all_state_labels[weights_order[i]])
-            fp.write(str(all_state_labels[weights_order[i]]) + "\n")
-    quit()
+    for key in chosen_keys:
+        print(key)
+    out_data["sector_eigenstates"] = chosen_keys
 
+    unique_sectors_used = list(set([w[0] for w in chosen_keys]))
+    total_dim_of_relevant_sectors = 0
+    print("Relevant sectors and their dimensions:")
+    for s in unique_sectors_used:
+        print(s, len(sectors[s]))
+        total_dim_of_relevant_sectors += len(sectors[s])
+    print("{0:} sectors in total".format(len(unique_sectors_used)))
+    print("Total dimension: {0:}".format(total_dim_of_relevant_sectors))
+
+    out_data["relevant_sectors"] = unique_sectors_used
+    out_data["relevant_sectors_count"] = len(unique_sectors_used)
+    out_data["relevant_sectors_total_dim"] = total_dim_of_relevant_sectors
+    with open(outname, "a") as fp:
+        json.dump(out_data, fp, indent=2)
 
 
 

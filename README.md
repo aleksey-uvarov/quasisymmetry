@@ -30,10 +30,24 @@ Input arguments and keywords:
 
 1. Hamiltonian. Checkfile or FCIDUMP. In the future I might add support for of.QubitOperator.  
 2. Parity matrix of the symmetries  
+<<<<<<< HEAD
 3. Reference state: \--reference, “fci”, “hf”, “dmrg” (defaults to fci). With “dmrg”, \--bond\_dim sets the bond dimension and \--wavefunction\_dir points at a local MPS store to reuse/create.  
 4. Cost backend: \--backend statevector|dmrg (default statevector). The dmrg backend evaluates NC/variance with MPS-native MPO–MPS multiplies on a fixed DMRG reference (no CI vector), using the identity ``||[H(U), S] U|ψ⟩|| = ||[H, U†SU]|ψ⟩||``. Same ``x`` output format.  
 5. Cost function: variance to ref, NC to ref (defaults to NC)  
 6. x0: optional initial guess for orbital rotations
+=======
+3. Reference state: \--reference, “fci”, “hf”, “cisd” (defaults to fci)  
+4. Cost function: variance to ref, NC to ref (defaults to NC), or a decoupled-sector energy objective  
+5. x0: optional initial guess for orbital rotations
+>>>>>>> f09fee37df2e44a547fbf022c745bee435e5c8cf
+
+Supported cost functions:
+
+1. `NC`: non-commutator cost against the chosen reference state.
+2. `variance`: symmetry variance against the chosen reference state.
+3. `decoupled`: expensive objective that rescans all sectors at every orbital-optimization step and minimizes the best single-sector energy.
+4. `fixed_sector`: cheaper objective that optimizes one sector. If `--fixed_sector` is not supplied, the initial lowest-energy sector is selected automatically.
+5. `switching_sector`: compromise objective. It selects the initial lowest-energy sector, optimizes it, rescans all sectors, switches if another sector is lower, and repeats until the selected sector stops changing or `--sector_switch_maxiter` is reached.
 
 Returns:
 
@@ -82,3 +96,10 @@ Outputs:
 
 All of this is saved in a text file.
 
+If you want to run this in parallel, call:
+
+`mpiexec -n 5 python -m mpi4py.futures metrics.py [arguments]`
+
+on a desktop and
+
+`srun -n 5 python -m mpi4py.futures metrics.py [arguments]`
