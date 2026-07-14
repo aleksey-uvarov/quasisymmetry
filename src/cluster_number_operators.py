@@ -1,15 +1,19 @@
+"""
+Utilities for managing cluster number operators.
+- build_one_orb_num_operators and build_two_orb_num_operators: adapt optimize_symmetries.parities to numbers
+- number_matrix_to_operators: adapts optimize_symmetries.parity_matrix_to_quasisymmetries
+- number_and_parity_symmetry_sectors: builds sectors for given cluster number operators and cluster parity operators
+"""
+
 import numpy as np
 import ffsim
 import scipy
 from scipy.sparse.linalg import LinearOperator
 from math import comb
 from functools import cache
+from scipy.special import factorial
 
-from utils import integers_to_phases_polynomial
-
-# from chemistry import load_moldata, fcidump_data # may need to modify path
-
-@cache # consider modifying output to tuple, so cached output will be immutable
+@cache
 def build_one_orb_num_operators(norb, nelec):
     """Returns list of single-orbital occupation number operators (alpha + beta)"""
     orb_number_operators = []
@@ -37,7 +41,32 @@ def build_two_orb_num_operators(norb, nelec):
             two_orb_number_operators.append(one_orb_num_operators[i] + one_orb_num_operators[j])
     return two_orb_number_operators
 
+def integers_to_phases_polynomial(N):
+    """
+    Computes the coefficients [a_0, a_1, ..., a_N] for the polynomial
+    P(x) = a_0 + a_1*x + a_2*x^2 + ... + a_N*x^N 
+    that maps integers n=0..N to exp(i * n * 2 * pi / (N+1) ) (unit semicircle).
+    """
+    omega = np.exp(1j * 2 * np.pi / (N+1))
+    final_poly = [0j] * (N + 1)
     
+    # FIX: Initialize as 1.0 (or 1 + 0j), not the imaginary unit (1j)
+    falling_fact = [1 + 0j] 
+    
+    for k in range(N + 1):
+        scalar = ((omega - 1)**k) / factorial(k)
+        for i, c in enumerate(falling_fact):
+            final_poly[i] += c * scalar
+        
+        if k < N:
+            next_fact = [0j] * (len(falling_fact) + 1)
+            for i, c in enumerate(falling_fact):
+                next_fact[i] -= c * k       
+                next_fact[i+1] += c         
+            falling_fact = next_fact
+            
+    return final_poly
+
 def from_num_operator_to_expnum_operator(num_operator, max_num_eval):
     """Returns LinearOperator exp(i * pi * num_operator / (max_num_eval + 1)), built efficiently"""
     dim = num_operator.shape[0]
@@ -124,5 +153,3 @@ def number_and_parity_symmetry_sectors(cluster_number_matrix, cluster_parity_mat
         sectors.setdefault(sector_label, []).append(i)
 
     return sectors
-
-# #TODO write code for the two scatterplots

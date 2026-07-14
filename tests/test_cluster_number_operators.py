@@ -1,18 +1,18 @@
+"""Tests for functions in src/cluster_number_operators.py on cluster numbers as quasisymmetries"""
+
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
-from metrics import symmetry_sectors
 import numpy as np
 import pytest
 import scipy
 import ffsim
-from cluster_number import build_one_orb_num_operators, build_two_orb_num_operators, number_matrix_to_operators, from_num_operator_to_expnum_operator, number_and_parity_symmetry_sectors
-from utils import integers_to_phases_polynomial
+from src.cluster_number_operators import build_one_orb_num_operators, build_two_orb_num_operators, number_matrix_to_operators, from_num_operator_to_expnum_operator, number_and_parity_symmetry_sectors, integers_to_phases_polynomial
 from scipy.sparse.linalg import LinearOperator
-from metrics import symmetry_sectors
+from src.sector_utils import symmetry_sectors
 
 def test_spin_orbital_occupations():
-    """Testing to get familiar with scipy/ffsim basis ordering and operator usage"""
+    """Testing to refresh scipy/ffsim basis ordering and operator usage"""
     norb = 3
     nelec = (1, 2) # alpha, beta
     # generate spin-orbital number operators
