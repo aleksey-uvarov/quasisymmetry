@@ -10,6 +10,11 @@ import pyscf.fci.cistring
 import scipy.sparse.linalg
 
 from external_imports import Clifford, taper_hamiltonian
+from src.coupled_energy_core import (
+    coupled_dimension_from_order,
+    one_shot_from_hamiltonian,
+    reference_candidate_order as _reference_candidate_order,
+)
 
 
 def qubit_operator_to_data(operator):
@@ -257,21 +262,46 @@ def apply_clifford_to_basis_bits(bits, clifford):
 
 def physical_sector_indices(norb, nelec, clifford, n_symmetries):
     """Map fixed-(Nalpha,Nbeta) determinants to tapered residual indices."""
-    sectors = {}
+    return physical_clifford_basis(norb, nelec, clifford, n_symmetries)[
+        "residual_indices"
+    ]
+
+
+def physical_clifford_basis(norb, nelec, clifford, n_symmetries):
+    """Map physical determinants to their Clifford-frame sector coordinates."""
+    sector_entries = {}
+    full_indices = []
     for alpha in itertools.combinations(range(norb), int(nelec[0])):
         for beta in itertools.combinations(range(norb), int(nelec[1])):
             bits = occupation_bits(alpha, beta, norb)
             transformed = apply_clifford_to_basis_bits(bits, clifford)
             label = tuple(transformed[:n_symmetries])
             residual_index = bits_to_index(transformed[n_symmetries:])
-            sectors.setdefault(label, []).append(residual_index)
+            full_index = bits_to_index(transformed)
+            physical_position = len(full_indices)
+            full_indices.append(full_index)
+            sector_entries.setdefault(label, []).append(
+                (residual_index, physical_position)
+            )
 
-    for label, indices in sectors.items():
-        unique = sorted(set(indices))
-        if len(unique) != len(indices):
+    if len(set(full_indices)) != len(full_indices):
+        raise ValueError("Clifford mapping is not one-to-one on physical determinants")
+
+    residual_indices = {}
+    physical_positions = {}
+    for label, entries in sector_entries.items():
+        ordered = sorted(entries)
+        indices = [item[0] for item in ordered]
+        positions = [item[1] for item in ordered]
+        if len(set(indices)) != len(indices):
             raise ValueError(f"Clifford mapping is not one-to-one in sector {label}")
-        sectors[label] = unique
-    return sectors
+        residual_indices[label] = indices
+        physical_positions[label] = positions
+    return {
+        "full_indices": full_indices,
+        "residual_indices": residual_indices,
+        "physical_positions": physical_positions,
+    }
 
 
 def parse_sector_labels(text, n_symmetries):
@@ -307,6 +337,82 @@ def restricted_operator_matrix(operator, n_qubits, row_indices, column_indices=N
     return matrix[np.asarray(row_indices), :][:, np.asarray(column_indices)]
 
 
+def pauli_term_action_masks(pauli_term, n_qubits):
+    """Return bit masks and a phase for one Pauli word acting on a ket."""
+    flip_mask = 0
+    sign_mask = 0
+    y_count = 0
+    for qubit, pauli in pauli_term:
+        mask = 1 << (n_qubits - 1 - qubit)
+        if pauli == "X":
+            flip_mask |= mask
+        elif pauli == "Y":
+            flip_mask |= mask
+            sign_mask |= mask
+            y_count += 1
+        elif pauli == "Z":
+            sign_mask |= mask
+        else:
+            raise ValueError(f"unsupported Pauli factor: {pauli}")
+    return flip_mask, sign_mask, 1j**y_count
+
+
+def physical_clifford_matrix(frame, full_indices):
+    """Build Hc only on the physical Clifford-frame determinant support.
+
+    This applies every Pauli word in the transformed Hamiltonian directly to
+    the physical computational-basis states.  It avoids making a full
+    2**n_qubits sparse matrix or separately tapering every sector pair.
+    """
+    dimension = len(full_indices)
+    index_to_position = {
+        int(full_index): position for position, full_index in enumerate(full_indices)
+    }
+    rows = []
+    columns = []
+    values = []
+
+    for pauli_term, coefficient in frame["hamiltonian"].terms.items():
+        flip_mask, sign_mask, y_phase = pauli_term_action_masks(
+            pauli_term, frame["n_qubits"]
+        )
+        for column, source_index in enumerate(full_indices):
+            target_index = int(source_index) ^ flip_mask
+            row = index_to_position.get(target_index)
+            if row is None:
+                continue
+            sign = -1.0 if (int(source_index) & sign_mask).bit_count() % 2 else 1.0
+            rows.append(row)
+            columns.append(column)
+            values.append(complex(coefficient) * y_phase * sign)
+
+    matrix = scipy.sparse.coo_matrix(
+        (values, (rows, columns)), shape=(dimension, dimension), dtype=complex
+    ).tocsr()
+    return 0.5 * (matrix + matrix.getH())
+
+
+def lowest_sector_eigenpairs(matrix, n_roots):
+    """Return the requested lowest eigenpairs of one Hermitian sector block."""
+    dimension = matrix.shape[0]
+    if dimension == 0:
+        raise ValueError("sector has no physical determinants")
+
+    root_count = min(max(1, int(n_roots)), dimension)
+    if dimension <= 2 or root_count >= dimension - 1:
+        energies, vectors = np.linalg.eigh(matrix.toarray())
+        return energies[:root_count], vectors[:, :root_count], "dense"
+
+    energies, vectors = scipy.sparse.linalg.eigsh(
+        matrix,
+        k=root_count,
+        which="SA",
+        tol=1e-12,
+    )
+    order = np.argsort(energies)
+    return energies[order], vectors[:, order], "eigsh"
+
+
 def solve_tapered_sector(frame, label, physical_indices, n_roots):
     """Solve low roots of one physical tapered sector."""
     operator = tapered_operator(frame, label, label)
@@ -316,48 +422,57 @@ def solve_tapered_sector(frame, label, physical_indices, n_roots):
         physical_indices,
     )
     matrix = 0.5 * (matrix + matrix.getH())
-    dimension = matrix.shape[0]
-    if dimension == 0:
-        raise ValueError(f"sector {label} has no physical determinants")
-
-    root_count = min(max(1, int(n_roots)), dimension)
-    if dimension <= 2 or root_count >= dimension - 1:
-        energies, vectors = np.linalg.eigh(matrix.toarray())
-        energies = energies[:root_count]
-        vectors = vectors[:, :root_count]
-        solver = "dense"
-    else:
-        energies, vectors = scipy.sparse.linalg.eigsh(
-            matrix,
-            k=root_count,
-            which="SA",
-            tol=1e-12,
-        )
-        order = np.argsort(energies)
-        energies = energies[order]
-        vectors = vectors[:, order]
-        solver = "eigsh"
+    energies, vectors, solver = lowest_sector_eigenpairs(matrix, n_roots)
 
     return {
         "label": tuple(label),
         "operator": operator,
+        # Keep the restricted diagonal block so coupled-space construction does
+        # not taper and restrict the same sector a second time.
+        "matrix": matrix,
         "physical_indices": list(physical_indices),
         "energies": np.real_if_close(energies),
         "vectors": vectors,
-        "dimension": int(dimension),
+        "dimension": int(matrix.shape[0]),
         "solver": solver,
         "pauli_count": len(operator.terms),
         "lcu_one_norm": float(sum(abs(complex(value)) for value in operator.terms.values())),
     }
 
 
+def solve_physical_clifford_sector(
+    physical_matrix,
+    label,
+    residual_indices,
+    physical_positions,
+    n_roots,
+):
+    """Solve one sector by slicing a prebuilt physical Clifford-frame matrix."""
+    positions = np.asarray(physical_positions, dtype=int)
+    matrix = physical_matrix[positions, :][:, positions]
+    matrix = 0.5 * (matrix + matrix.getH())
+    energies, vectors, solver = lowest_sector_eigenpairs(matrix, n_roots)
+    return {
+        "label": tuple(label),
+        "matrix": matrix,
+        "physical_indices": list(residual_indices),
+        "physical_positions": list(physical_positions),
+        "energies": np.real_if_close(energies),
+        "vectors": vectors,
+        "dimension": int(matrix.shape[0]),
+        "solver": solver,
+    }
+
+
 def pauli_lcu_is_hermitian(operator, n_qubits, atol=1e-10):
-    """Check Hermiticity using the sparse matrix representation."""
-    matrix = of.get_sparse_operator(operator, n_qubits=n_qubits).tocsr()
-    difference = matrix - matrix.getH()
-    if difference.nnz == 0:
-        return True
-    return bool(np.max(np.abs(difference.data)) <= atol)
+    """Check Hermiticity without materializing the full Pauli matrix.
+
+    Each Pauli word is Hermitian, so a QubitOperator is Hermitian exactly when
+    every collected Pauli coefficient is real.  The qubit count is retained in
+    the interface for compatibility with existing callers.
+    """
+    del n_qubits
+    return all(abs(complex(coefficient).imag) <= atol for coefficient in operator.terms.values())
 
 
 def sector_reference_amplitudes(transformed_state, label, residual_indices, n_residual_qubits):
@@ -386,11 +501,12 @@ def sector_state_candidates(sector_results):
     return candidates
 
 
-def candidate_hamiltonian(frame, candidates):
-    """Build the coupled Hamiltonian in the tapered sector-state basis."""
+def candidate_hamiltonian(frame, candidates, block_cache=None):
+    """Build the coupled Hamiltonian from cached tapered sector-pair blocks."""
     dimension = len(candidates)
     h_coupled = np.zeros((dimension, dimension), dtype=complex)
-    block_cache = {}
+    if block_cache is None:
+        block_cache = {}
 
     for i, bra in enumerate(candidates):
         for j in range(i, dimension):
@@ -430,39 +546,7 @@ def candidate_reference_weights(frame, candidates, transformed_reference):
 
 def reference_candidate_order(weights):
     """Order candidates from largest to smallest reference weight."""
-    return list(np.argsort(np.asarray(weights))[::-1])
-
-
-def perturbative_candidate_order(h_coupled, denominator_floor=1e-8):
-    """Greedily order states by a coupling-squared-over-gap estimate."""
-    if h_coupled.shape[0] == 0:
-        return []
-    chosen = [int(np.argmin(np.real(np.diag(h_coupled))))]
-    remaining = set(range(h_coupled.shape[0])) - set(chosen)
-
-    while remaining:
-        submatrix = h_coupled[np.ix_(chosen, chosen)]
-        energies, vectors = np.linalg.eigh(submatrix)
-        ground_energy = float(np.real(energies[0]))
-        ground_vector = vectors[:, 0]
-
-        best_index = None
-        best_score = -1.0
-        for index in remaining:
-            couplings = h_coupled[np.ix_(chosen, [index])][:, 0]
-            effective_coupling = np.vdot(ground_vector, couplings)
-            denominator = max(
-                abs(float(np.real(h_coupled[index, index])) - ground_energy),
-                denominator_floor,
-            )
-            score = float(abs(effective_coupling) ** 2 / denominator)
-            if score > best_score:
-                best_score = score
-                best_index = index
-
-        chosen.append(int(best_index))
-        remaining.remove(best_index)
-    return chosen
+    return _reference_candidate_order(weights)
 
 
 def perturbative_coupled_energy_curve(
@@ -470,69 +554,28 @@ def perturbative_coupled_energy_curve(
     exact_energy=None,
     tolerance=0.0016,
     denominator_floor=1e-8,
+    tau_pt=1e-12,
+    block_size=1,
 ):
-    """Select perturbative candidates and stop when the target is reached."""
-    if h_coupled.shape[0] == 0:
-        return {"order": [], "energies": [], "K": None, "converged": False}
-
-    chosen = [int(np.argmin(np.real(np.diag(h_coupled))))]
-    remaining = set(range(h_coupled.shape[0])) - set(chosen)
-    energies = []
-    k_epsilon = None
-
-    while chosen:
-        submatrix = h_coupled[np.ix_(chosen, chosen)]
-        eigenvalues, eigenvectors = np.linalg.eigh(submatrix)
-        ground_energy = float(np.real(eigenvalues[0]))
-        ground_vector = eigenvectors[:, 0]
-        energies.append(ground_energy)
-
-        if exact_energy is not None and abs(ground_energy - exact_energy) <= tolerance:
-            k_epsilon = len(chosen)
-            break
-        if not remaining:
-            break
-
-        best_index = None
-        best_score = -1.0
-        for index in remaining:
-            couplings = h_coupled[np.ix_(chosen, [index])][:, 0]
-            effective_coupling = np.vdot(ground_vector, couplings)
-            denominator = max(
-                abs(float(np.real(h_coupled[index, index])) - ground_energy),
-                denominator_floor,
-            )
-            score = float(abs(effective_coupling) ** 2 / denominator)
-            if score > best_score:
-                best_score = score
-                best_index = index
-
-        chosen.append(int(best_index))
-        remaining.remove(best_index)
-
-    return {
-        "order": chosen,
-        "energies": energies,
-        "K": k_epsilon,
-        "converged": k_epsilon is not None,
-    }
+    """One-shot PT ordering + nested variational curve (Clifford entry point)."""
+    result = one_shot_from_hamiltonian(
+        np.asarray(h_coupled),
+        e_exact=exact_energy,
+        tol=tolerance,
+        tau_pt=tau_pt,
+        block_size=block_size,
+        degeneracy_floor=denominator_floor,
+    )
+    return result.as_curve()
 
 
 def coupled_energy_curve(h_coupled, order, exact_energy=None, tolerance=0.0016):
-    """Return the variational energy curve and first K reaching a tolerance."""
-    energies = []
-    k_epsilon = None
-    for count in range(1, len(order) + 1):
-        indices = order[:count]
-        energy = float(np.linalg.eigvalsh(h_coupled[np.ix_(indices, indices)])[0])
-        energies.append(energy)
-        if exact_energy is not None and k_epsilon is None:
-            if abs(energy - exact_energy) <= tolerance:
-                k_epsilon = count
-                break
-    return {
-        "order": [int(index) for index in order],
-        "energies": energies,
-        "K": k_epsilon,
-        "converged": k_epsilon is not None,
-    }
+    """Nested variational energy curve along a fixed candidate order."""
+    result = coupled_dimension_from_order(
+        np.asarray(h_coupled),
+        order,
+        e_exact=exact_energy,
+        tol=tolerance,
+        k_start=1,
+    )
+    return result.as_curve()
