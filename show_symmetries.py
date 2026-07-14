@@ -2,6 +2,7 @@ import argparse
 import ffsim
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 from matplotlib.colors import LogNorm
 
@@ -35,6 +36,8 @@ if __name__=="__main__":
         _, state = get_fci(dumpdata)
     elif args.reference == "hf":
         state = ffsim.hartree_fock_state(moldata.norb, moldata.nelec)
+    elif args.reference == "cisd":
+        raise NotImplementedError()
     else:
         raise ValueError("reference must be fci or hf")
 
@@ -61,6 +64,10 @@ if __name__=="__main__":
         c = h @ quartets[i] - quartets[i] @ h
         nc_scores[iu[0][i], iu[1][i]] = np.linalg.norm(c @ state) ** 2
 
+    p = Path(args.molpath)
+
+    outname = "symmetry_scores_" + p.parts[-1] + ".txt"
+    np.savetxt(outname, nc_scores)
     plt.figure()
     plt.imshow(nc_scores, norm=LogNorm(vmin=1e-4, vmax=1))
     plt.colorbar()

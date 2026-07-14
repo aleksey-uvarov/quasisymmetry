@@ -31,12 +31,11 @@ if __name__=="__main__":
 
     mf = pyscf.scf.RHF(mol)
     if not args.localized:
-        mf.chkfile = "hamiltonians/" + description + ".chk"
+        mf.chkfile = "hamiltonians/" + description + str(args.basis) + ".chk"
         mf.kernel()
     else:
-        mf.chkfile = "hamiltonians/" + description + "_Pipek.chk"
+        mf.chkfile = "hamiltonians/" + description + str(args.basis) + "_Pipek.chk"
         mf.kernel()
-        # localizer = lo.Boys(mol, mf.mo_coeff[:, mf.mo_occ > 0])
         localizer = lo.PipekMezey(mol, mf.mo_coeff[:, mf.mo_occ > 0])
         loc_orbs_occ = localizer.kernel()
 
@@ -45,13 +44,5 @@ if __name__=="__main__":
         plt.imshow(mf.mo_coeff, cmap="PuOr", vmin=-1, vmax=1)
         plt.yticks(range(mf.mo_coeff.shape[0]), mol.ao_labels())
         plt.show()
-
-        # new_mo_coeff = mf.mo_coeff.copy()
-        # new_mo_coeff = loc_orbs
-        # mf.chkfile = "hamiltonians/" + description + "_LMO.chk"
-        # pyscf.lib.chkfile.dump_scf(mol, "hamiltonians/" + description + "_LMO.chk",
-        #                            mf.e_tot, mf.mo_energy,
-        #                            mf.mo_coeff, mf.mo_occ)
-        # pyscf.lib.chkfile.save_mol(mf, "hamiltonians/" + description + "_LMO.chk")
 
 

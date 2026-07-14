@@ -174,7 +174,7 @@ def compute_K_values(score_type, example_cluster_matrices_index, bond_length, ho
         f = cost_functions.variance_cost_beyond_parities(moldata_ffsim, quasisymmetry_operators, fci_state)
     if score_type == 'eval_eq':
         cluster_number_evals = [round(np.real(fci_state.T.conj() @ (op @ fci_state))) for op in cluster_number_operators] # best guess of eigenvalues
-        cluster_parity_evals = [round(np.real(fci_state.T.conj() @ (op @ fci_state))) for op in cluster_parity_operators] # same
+        cluster_parity_evals = [np.sign(fci_state.T.conj() @ (op @ fci_state)) for op in cluster_parity_operators] # same
         evals = cluster_number_evals + cluster_parity_evals
         f = cost_functions.eval_eq_cost(quasisymmetry_operators, evals, fci_state, norb, nelec) 
 

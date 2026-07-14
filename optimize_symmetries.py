@@ -1,24 +1,67 @@
+from __future__ import annotations
+
 import argparse
-import numpy as np
+import json
 import time
-import ffsim
+from functools import cache, reduce
+from math import comb
+from pathlib import Path
+from typing import Any, Callable, Union
+from uuid import uuid4
+
+import numpy as np
 import scipy
 import scipy.optimize
 import scipy.sparse.linalg
-import pyscf
-import pyscf.fci
-import openfermion as of
-import openfermionpyscf
 
-from typing import Callable, Any, Union
-from math import comb
-from functools import cache, reduce
-
-from chemistry import load_moldata, fcidump_data
-
-from src.state_utils import get_cisd_gs, get_fci_state_openfermion
-from src.bs import beam
-import fcidump_openfermion
+try:
+    import ffsim
+    import openfermion as of
+    import openfermionpyscf  # noqa: F401 — registers openfermion pyscf integration
+    import pyscf
+    import pyscf.fci
+    import pyscf.tools.fcidump  # noqa: F401
+    import fcidump_openfermion  # noqa: F401
+    from chemistry import fcidump_data, load_moldata
+    from src.bs import beam  # noqa: F401
+    from src.decoupled_energy import (
+        best_sector,
+        make_decoupled_energy_cost,
+        make_fixed_sector_energy_cost,
+        make_clifford_decoupled_energy_cost,
+        make_clifford_fixed_sector_energy_cost,
+        optimize_with_sector_switching,
+        optimize_with_clifford_sector_switching,
+        scan_clifford_sector_energies,
+    )
+    from src.clifford_sectors import (
+        load_symmetry_manifest,
+        prepare_clifford_context,
+        z_symmetries_from_parity_matrix,
+    )
+    from src.sector_utils import symmetry_sectors
+    from src.state_utils import get_cisd_gs, get_fci_state_openfermion  # noqa: F401
+except ImportError as exc:
+    _FCI_STACK_ERROR = exc
+    ffsim = None
+    of = None
+    pyscf = None
+    fcidump_data = None
+    load_moldata = None
+    best_sector = None
+    make_decoupled_energy_cost = None
+    make_fixed_sector_energy_cost = None
+    make_clifford_decoupled_energy_cost = None
+    make_clifford_fixed_sector_energy_cost = None
+    optimize_with_sector_switching = None
+    optimize_with_clifford_sector_switching = None
+    scan_clifford_sector_energies = None
+    load_symmetry_manifest = None
+    prepare_clifford_context = None
+    z_symmetries_from_parity_matrix = None
+    symmetry_sectors = None
+else:
+    _FCI_STACK_ERROR = None
 
 
 def commutator_cost(moldata: ffsim.MolecularData,
@@ -244,10 +287,21 @@ def expand_state(mol: of.MolecularData, ci: np.ndarray, threshold: float = 1e-12
     return state.todense()
 
 
-def callback(intermediate_result: scipy.optimize.OptimizeResult) -> None:
+def callback(intermediate_result) -> None:
     print(time.strftime("%a, %d %b %Y %H:%M:%S",
                         time.localtime()), end=" ")
-    print("{0:4.6f}".format(intermediate_result.fun))
+    # SciPy < 1.11 passes the parameter vector; newer versions pass OptimizeResult.
+    if hasattr(intermediate_result, "fun"):
+        print("{0:4.6f}".format(intermediate_result.fun))
+    else:
+        print("(iter)")
+
+
+def parse_sector_label(text):
+    """Parse a command-line sector label such as ``0,1,0``."""
+    if not text.strip():
+        raise ValueError("empty sector label")
+    return tuple(int(part.strip()) for part in text.split(","))
 
 
 def comm_sq_exp_fast(sym_ops: list[of.QubitOperator], H: Any, state: np.ndarray, n_qubits: int, verbose: bool = False) -> Union[float, complex]:
@@ -308,10 +362,8 @@ def comm_sq_exp_fast(sym_ops: list[of.QubitOperator], H: Any, state: np.ndarray,
 #   2. Or build ffsim.FermionOperator directly  →  ffsim.linear_operator(op, norb, nelec)
 #   3. Pass the resulting LinearOperator in the symmetries list to commutator_cost
 #   That's it. commutator_cost needs no changes.
- 
-import pyscf.tools.fcidump
- 
- 
+
+
 def of_to_ffsim(op: of.FermionOperator) -> ffsim.FermionOperator:
     """
     Remap of.FermionOperator to ffsim.FermionOperator.
@@ -423,9 +475,71 @@ if __name__=="__main__":
     parser.add_argument("parity", nargs="?", default=None,
                         help="path to the incidence matrix of symmetries")
     parser.add_argument("--seniority", action="store_true")
-    parser.add_argument("--reference", default="fci")   # fci or hf
-    parser.add_argument("--cost_function", default="NC")   # NC or variance
+    parser.add_argument(
+        "--reference",
+        choices=("fci", "hf", "dmrg"),
+        default="fci",
+        help="reference state (dmrg: MPS ground state; with --backend statevector "
+             "the MPS is reconstructed as a CI vector)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("statevector", "dmrg"),
+        default="statevector",
+        help="cost evaluation backend: statevector (ffsim/FCI, default) or "
+             "dmrg (MPS-native NC/variance; scales beyond FCI)",
+    )
+    parser.add_argument("--bond_dim", type=int, default=250,
+                        help="DMRG bond dimension (--reference/--backend dmrg)")
+    parser.add_argument("--wavefunction_dir", default=None,
+                        help="local DMRG wavefunction store to reuse/create")
+    parser.add_argument("--n_threads", type=int, default=4,
+                        help="block2 threads (dmrg backend / reference)")
+    parser.add_argument("--multiply_bond_dim", type=int, default=None,
+                        help="bond dimension for MPO-MPS multiplies (dmrg backend)")
+    parser.add_argument("--multiply_sweeps", type=int, default=8,
+                        help="sweeps per MPO-MPS multiply (dmrg backend)")
+    parser.add_argument(
+        "--cost_function",
+        choices=("NC", "variance", "decoupled", "fixed_sector", "switching_sector"),
+        default="NC",
+    )
+    parser.add_argument(
+        "--sector_backend",
+        choices=("determinant", "clifford"),
+        default="determinant",
+        help="sector representation used by the energy objectives",
+    )
+    parser.add_argument(
+        "--symmetry_manifest",
+        default=None,
+        help="ordered Z-product symmetry manifest for the Clifford backend",
+    )
     parser.add_argument("--x0", default=None)
+    parser.add_argument(
+        "--fixed_sector",
+        default=None,
+        help="sector label for fixed_sector mode, e.g. 0,1,0. If omitted, use the best initial sector.",
+    )
+    parser.add_argument(
+        "--optimizer_maxiter",
+        type=int,
+        default=100,
+        help="maximum L-BFGS-B iterations per optimization stage",
+    )
+    parser.add_argument(
+        "--maxiter",
+        dest="optimizer_maxiter",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="alias for --optimizer_maxiter",
+    )
+    parser.add_argument(
+        "--sector_switch_maxiter",
+        type=int,
+        default=5,
+        help="maximum sector switches for switching_sector mode",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--outname", default=None)
     parser.add_argument("--output_fcidump", default=None,
@@ -435,10 +549,141 @@ if __name__=="__main__":
 
     args = parser.parse_args()
 
+    # ── MPS-native backend (NC / variance only) ───────────────────────────────
+    if args.backend == "dmrg":
+        from src.dmrg_costs import MultiplyConfig, build_dmrg_orbital_costs
+        from src.dmrg_solver import DMRGConfig
+
+        if args.cost_function not in ("NC", "variance"):
+            parser.error(
+                "--backend dmrg only supports cost_function NC or variance "
+                "(decoupled / sector modes need the statevector FCI path)"
+            )
+        if args.sector_backend != "determinant":
+            parser.error(
+                "--sector_backend clifford is a statevector-sector backend; "
+                "use --backend statevector"
+            )
+        if args.seniority:
+            parser.error("--backend dmrg requires a parity matrix (not --seniority)")
+        if args.parity is None:
+            parser.error("--backend dmrg requires a parity matrix file")
+        if args.reference not in ("dmrg", "fci"):
+            parser.error(
+                "--backend dmrg uses the DMRG ground state as reference; "
+                "use --reference dmrg (or fci as an alias)"
+            )
+        if args.orbene_npy is not None:
+            parser.error("--orbene_npy is not supported with --backend dmrg")
+
+        parity_matrix = np.atleast_2d(np.loadtxt(args.parity, dtype=int))
+        store_dir = args.wavefunction_dir
+        if store_dir is None:
+            store_dir = str(Path("wavefunctions") / Path(args.molpath).stem)
+
+        costs, dmrg_result, solver = build_dmrg_orbital_costs(
+            args.molpath,
+            parity_matrix,
+            store_dir=store_dir,
+            config=DMRGConfig(
+                max_bond_dim=args.bond_dim,
+                n_sweeps=max(12, args.bond_dim // 20 + 8),
+            ),
+            multiply=MultiplyConfig(
+                bond_dim=args.multiply_bond_dim,
+                n_sweeps=args.multiply_sweeps,
+            ),
+            reuse=True,
+            n_threads=args.n_threads,
+        )
+        print("DMRG reference energy: {0:4.6f}".format(dmrg_result.energy))
+        print("wavefunction store: {}".format(dmrg_result.store_dir))
+
+        f = costs.cost_function(args.cost_function)
+        x0 = (
+            np.loadtxt(args.x0)
+            if args.x0
+            else np.zeros(comb(solver.n_sites, 2))
+        )
+        cost_before = f(x0)
+        print("before optimization: {0:4.6f}".format(cost_before))
+
+        t_start = time.time()
+        if args.optimizer_maxiter > 0:
+            res = scipy.optimize.minimize(
+                f,
+                x0,
+                method="L-BFGS-B",
+                options={"maxiter": args.optimizer_maxiter},
+                callback=callback if args.verbose else None,
+            )
+            elapsed = time.time() - t_start
+            print(res.message)
+            print("optimized: {0:4.6f}".format(res.fun))
+        else:
+            res = scipy.optimize.OptimizeResult()
+            res.x = x0
+            res.fun = cost_before
+            res.success = False
+            res.nit = 0
+            res.nfev = 0
+            elapsed = 0.0
+            res.message = "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT"
+
+        if args.output_fcidump is not None:
+            moldata = load_moldata(args.molpath)
+            rh = moldata.hamiltonian.rotated(x_to_rotation(res.x, moldata.norb))
+            ffsim.MolecularData(
+                atom=moldata.atom, basis=moldata.basis, spin=moldata.spin,
+                nelec=moldata.nelec, hf_energy=moldata.hf_energy,
+                norb=moldata.norb, core_energy=moldata.core_energy,
+                one_body_integrals=rh.one_body_tensor,
+                two_body_integrals=rh.two_body_tensor,
+            ).to_fcidump(args.output_fcidump)
+
+        p = Path(args.molpath)
+        if args.outname:
+            outname = args.outname
+        else:
+            outname = (
+                "OO_" + p.parts[-1] + "_"
+                + time.strftime("%Y%m%d_%H%M%S", time.localtime())
+                + "_" + str(uuid4())[:6] + ".json"
+            )
+        out_data = {
+            "backend": "dmrg",
+            "cost_before": float(cost_before),
+            "cost_after": float(res.fun),
+            "converged": bool(res.success),
+            "nit": int(res.nit),
+            "nfev": int(res.nfev),
+            "elapsed": float(elapsed),
+            "message": str(res.message),
+            "dmrg_energy": float(dmrg_result.energy),
+            "wavefunction_dir": str(dmrg_result.store_dir),
+            "rotation": res.x.tolist(),
+        }
+        with open(outname, "a") as fp:
+            json.dump(vars(args) | out_data, fp, indent=2)
+        print("results written to", outname)
+        raise SystemExit(0)
+
+    if _FCI_STACK_ERROR is not None:
+        raise SystemExit(
+            f"--backend statevector requires pyscf/ffsim ({_FCI_STACK_ERROR}). "
+            "Use --backend dmrg on FCIDUMP files without those packages, "
+            "or install the FCI stack / use optimize_dmrg.py."
+        )
+
     moldata  = load_moldata(args.molpath)
     dumpdata = fcidump_data(args.molpath)
 
     # ── symmetries ────────────────────────────────────────────────────────────
+    symmetry_manifest = (
+        load_symmetry_manifest(args.symmetry_manifest)
+        if args.symmetry_manifest
+        else None
+    )
     if args.seniority:
         sym_of = of.FermionOperator()
         for p in range(moldata.norb):
@@ -450,61 +695,228 @@ if __name__=="__main__":
         symmetry_op = sym_of
         sym_linops  = [fermion_op_to_linop(sym_of, moldata.norb, moldata.nelec)]
     elif args.parity is not None:
-        parity_matrix = np.loadtxt(args.parity, dtype=int)
+        parity_matrix = np.atleast_2d(np.loadtxt(args.parity, dtype=int))
         symmetry_op   = parity_matrix_to_quasisymmetries(parity_matrix,
                                                           moldata.norb,
                                                           moldata.nelec)
         sym_linops    = symmetry_op
+    elif symmetry_manifest is not None:
+        parity_matrix = np.atleast_2d(
+            np.asarray(symmetry_manifest["parity_matrix"], dtype=int)
+        )
+        symmetry_op = parity_matrix_to_quasisymmetries(
+            parity_matrix, moldata.norb, moldata.nelec
+        )
+        sym_linops = symmetry_op
     else:
         parser.error("supply a parity matrix file or --seniority")
+
+    clifford_symmetries = None
+    if args.sector_backend == "clifford":
+        if args.seniority:
+            parser.error("Clifford backend currently requires Z-product symmetries")
+        if symmetry_manifest is not None:
+            clifford_symmetries = symmetry_manifest["symmetries"]
+        else:
+            clifford_symmetries = z_symmetries_from_parity_matrix(
+                parity_matrix, moldata.norb
+            )
 
     # ── reference state ───────────────────────────────────────────────────────
     if args.reference == "fci":
         _, state = get_fci(dumpdata)
     elif args.reference == "hf":
         state = ffsim.hartree_fock_state(moldata.norb, moldata.nelec)
+    elif args.reference == "dmrg":
+        from src.dmrg_solver import DMRGConfig, get_dmrg_reference
+
+        e_dmrg, state = get_dmrg_reference(
+            dumpdata,
+            store_dir=args.wavefunction_dir,
+            config=DMRGConfig(max_bond_dim=args.bond_dim),
+            n_threads=args.n_threads,
+            reuse=True,
+        )
+        print("DMRG reference energy: {0:4.6f}".format(e_dmrg))
     else:
-        raise ValueError("reference must be fci or hf")
+        raise ValueError("reference must be fci, hf or dmrg")
     # Wrap as callable; optimize_fcidump will call reference_fn(moldata) internally.
     # Using a lambda that returns the already-computed state avoids running the
     # solver a second time.
     reference_fn = lambda md: state
 
-    # ── nc_before (needed for logging) ────────────────────────────────────────
+    # ── cost before optimization ──────────────────────────────────────────────
     x0 = np.loadtxt(args.x0) if args.x0 else np.zeros(comb(moldata.norb, 2))
+    switching_history = None
+
     if args.cost_function == "NC":
-        f_before = commutator_cost(moldata, sym_linops, state)
+        f = commutator_cost(moldata, sym_linops, state)
     elif args.cost_function == "variance":
-        f_before = variance_cost(moldata, sym_linops, state)
+        f = variance_cost(moldata, sym_linops, state)
+    elif args.cost_function == "decoupled":
+        if args.parity is None and symmetry_manifest is None:
+            parser.error("decoupled cost requires a parity matrix")
+        if args.sector_backend == "clifford":
+            f, clifford_context = make_clifford_decoupled_energy_cost(
+                moldata, clifford_symmetries
+            )
+        else:
+            sectors = symmetry_sectors(parity_matrix, moldata.norb, moldata.nelec)
+            f = make_decoupled_energy_cost(moldata, sectors)
+    elif args.cost_function == "fixed_sector":
+        if args.parity is None and symmetry_manifest is None:
+            parser.error("fixed_sector cost requires a parity matrix")
+        if args.sector_backend == "clifford":
+            clifford_context = prepare_clifford_context(
+                clifford_symmetries, moldata.norb, moldata.nelec
+            )
+            if args.fixed_sector is None:
+                initial_energy, sector_label, _ = scan_clifford_sector_energies(
+                    moldata, clifford_context, x0
+                )[0]
+                print("Selected initial fixed sector:", sector_label)
+                print("Initial fixed-sector energy: {0:4.12f}".format(initial_energy))
+            else:
+                sector_label = parse_sector_label(args.fixed_sector)
+            f = make_clifford_fixed_sector_energy_cost(
+                moldata, clifford_context, sector_label
+            )
+        else:
+            sectors = symmetry_sectors(parity_matrix, moldata.norb, moldata.nelec)
+            if args.fixed_sector is None:
+                initial_energy, sector_label, _ = best_sector(moldata, sectors, x0)
+                print("Selected initial fixed sector:", sector_label)
+                print("Initial fixed-sector energy: {0:4.12f}".format(initial_energy))
+            else:
+                sector_label = parse_sector_label(args.fixed_sector)
+            if sector_label not in sectors:
+                raise ValueError(
+                    f"sector {sector_label} is not present in this determinant space"
+                )
+            f = make_fixed_sector_energy_cost(moldata, sectors[sector_label])
+    elif args.cost_function == "switching_sector":
+        if args.parity is None and symmetry_manifest is None:
+            parser.error("switching_sector cost requires a parity matrix")
+        if args.sector_backend == "clifford":
+            clifford_context = prepare_clifford_context(
+                clifford_symmetries, moldata.norb, moldata.nelec
+            )
+            initial_energy, initial_label, _ = scan_clifford_sector_energies(
+                moldata, clifford_context, x0
+            )[0]
+        else:
+            sectors = symmetry_sectors(parity_matrix, moldata.norb, moldata.nelec)
+            initial_energy, initial_label, _ = best_sector(moldata, sectors, x0)
+        print("Initial switching sector:", initial_label)
+        f = None
     else:
-        raise ValueError("cost must be 'NC' or 'variance'")
-    nc_before = f_before(x0)
-    print("before optimization: {0:4.6f}".format(nc_before))
+        raise ValueError("unknown cost function")
+
+    cost_before = initial_energy if args.cost_function == "switching_sector" else f(x0)
+    print("before optimization: {0:4.6f}".format(cost_before))
 
     # ── optimise ──────────────────────────────────────────────────────────────
     t_start = time.time()
-    res = optimize_fcidump(
-        input_path=args.molpath,
-        symmetry_op=symmetry_op,
-        reference_fn=reference_fn,
-        output_path=args.output_fcidump,
-        x0=x0,
-        method="L-BFGS-B",
-        maxiter=100,
-        verbose=args.verbose,
-        cost=args.cost_function,
-    )
-    elapsed = time.time() - t_start
-    print(res.message)
-    print("optimized: {0:4.6f}".format(res.fun))
+    if args.optimizer_maxiter > 0:
+        if args.cost_function in ("NC", "variance"):
+            res = optimize_fcidump(
+                input_path=args.molpath,
+                symmetry_op=symmetry_op,
+                reference_fn=reference_fn,
+                output_path=args.output_fcidump,
+                x0=x0,
+                method="L-BFGS-B",
+                maxiter=args.optimizer_maxiter,
+                verbose=args.verbose,
+                cost=args.cost_function,
+            )
+        elif args.cost_function == "switching_sector":
+            if args.sector_backend == "clifford":
+                res, switching_history = optimize_with_clifford_sector_switching(
+                    moldata,
+                    clifford_symmetries,
+                    x0,
+                    maxiter=args.optimizer_maxiter,
+                    max_switches=args.sector_switch_maxiter,
+                    callback=callback if args.verbose else None,
+                )
+            else:
+                res, switching_history = optimize_with_sector_switching(
+                    moldata,
+                    sectors,
+                    x0,
+                    maxiter=args.optimizer_maxiter,
+                    max_switches=args.sector_switch_maxiter,
+                    callback=callback if args.verbose else None,
+                )
+            for i, step in enumerate(switching_history):
+                print(
+                    "switch step {0}: {1} -> {2}; optimized={3:4.12f}; rescanned={4:4.12f}".format(
+                        i,
+                        step["start_sector"],
+                        step["best_sector_after_rescan"],
+                        step["optimized_energy"],
+                        step["best_energy_after_rescan"],
+                    )
+                )
+        else:
+            res = scipy.optimize.minimize(
+                f,
+                x0,
+                method="L-BFGS-B",
+                options={"maxiter": args.optimizer_maxiter},
+                callback=callback if args.verbose else None,
+            )
 
-    outname = args.outname if args.outname else time.strftime("%Y%m%d_%H%M%S", time.localtime()) + ".txt"
-    with open(outname, "a", newline="") as fp:
-        fp.write(str(vars(args)) + "\n")
-        fp.write(f"# nc_before={nc_before:.6e}  nc_after={res.fun:.6e}  "
-                 f"converged={res.success}  nit={res.nit}  nfev={res.nfev}  "
-                 f"elapsed_s={elapsed:.1f}  message={res.message}\n")
-        np.savetxt(fp, res.x)
+        if args.cost_function not in ("NC", "variance") and args.output_fcidump is not None:
+            U_opt = x_to_rotation(res.x, moldata.norb)
+            rh = moldata.hamiltonian.rotated(U_opt)
+            ffsim.MolecularData(
+                atom=moldata.atom, basis=moldata.basis, spin=moldata.spin, nelec=moldata.nelec,
+                hf_energy=moldata.hf_energy, norb=moldata.norb, core_energy=moldata.core_energy,
+                one_body_integrals=rh.one_body_tensor,
+                two_body_integrals=rh.two_body_tensor,
+            ).to_fcidump(args.output_fcidump)
+
+        elapsed = time.time() - t_start
+        print(res.message)
+        print("optimized: {0:4.6f}".format(res.fun))
+    else:
+        print("Optimizer maxiter = 0, returning data for canonical orbitals")
+        res = scipy.optimize.OptimizeResult()
+        res.x = x0
+        res.fun = cost_before
+        res.success = False
+        res.nit = 0
+        res.nfev = 0
+        elapsed = 0
+        res.message = "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT"
+
+    p = Path(args.molpath)
+    if args.outname:
+        outname = args.outname
+    else:
+        outname = ("OO_" +
+                   p.parts[-1] + "_" +
+                   time.strftime("%Y%m%d_%H%M%S", time.localtime())
+                   + "_" + str(uuid4())[:6] + ".json")
+
+    out_data = {}
+    out_data["cost_before"] = cost_before
+    out_data["cost_after"] = res.fun
+    out_data["converged"] = res.success
+    out_data["nit"] = res.nit
+    out_data["nfev"] = res.nfev
+    out_data["elapsed"] = elapsed
+    out_data["message"] = res.message
+    if switching_history is not None:
+        out_data["switching_history"] = switching_history
+    out_data["rotation"] = res.x.tolist()
+
+    full_output = vars(args) | out_data
+
+    with open(outname, "a") as fp:
+        json.dump(full_output, fp, indent=2)
 
     # ── orbene_npy (optional) ─────────────────────────────────────────────────
     if args.orbene_npy:

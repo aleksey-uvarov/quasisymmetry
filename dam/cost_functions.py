@@ -34,11 +34,11 @@ def commutator_cost_v2(moldata: ffsim.MolecularData,
         return total_nc
     return f
 
-# this version of variance_cost works for arbitrary symmetry ops, not only parities/idempotent ops.
-# Set only_parities=True for efficient idempotent-only version
+# this version of variance_cost works for arbitrary symmetry ops, not only parity ops (i.e., spec = {-1, 1}).
+# Set only_parities=True for efficient parity-only version
 def variance_cost_general(moldata: ffsim.MolecularData,
                     symmetries: list[scipy.sparse.linalg.LinearOperator],
-                    reference_state: np.ndarray, idempotent=False) -> Callable:
+                    reference_state: np.ndarray, only_parities=False) -> Callable:
     def f(x: np.ndarray) -> float:
         U = x_to_rotation(x, moldata.norb)
         rotated_state = ffsim.apply_orbital_rotation(reference_state,
@@ -47,7 +47,7 @@ def variance_cost_general(moldata: ffsim.MolecularData,
                                                      moldata.nelec)
         total_var = 0
         for s in symmetries:
-            if idempotent: # use simplified expression
+            if only_parities: # use simplified expression
                 total_var += 1 - ((rotated_state.T.conj() @ s @ rotated_state)**2).real
             else:
                 total_var += (reference_state.T.conj() @ (s @ (s @ reference_state)) - (reference_state.T.conj() @ (s @ reference_state)) ** 2).real
@@ -55,9 +55,9 @@ def variance_cost_general(moldata: ffsim.MolecularData,
     return f
 
 # eigenvalue equation-based cost function
-# Set only_parities=True for efficient idempotent-only version
+# Set only_parities=True for efficient only_parities-only version
 def eval_eq_cost(symmetries: list, evals: list,
-                    reference_state: np.ndarray, norb:int, nelec:int, idempotent=False) -> Callable:
+                    reference_state: np.ndarray, norb:int, nelec:int, only_parities=False) -> Callable:
     if len(symmetries) != len(evals):
         raise ValueError("len(evals) must match len(symmetries)")
     def f(x):
@@ -68,8 +68,8 @@ def eval_eq_cost(symmetries: list, evals: list,
                                                      nelec)
         total = 0
         for i in range(len(symmetries)):
-            if idempotent: # use simplified expression
-                total += evals[i] + (1 - 2 * evals[i]) * np.vdot(rotated_state, symmetries[i] @ rotated_state).real
+            if only_parities: # use simplified expression
+                total += 2 * (1 - evals[i] * np.vdot(rotated_state, symmetries[i] @ rotated_state).real)
             else:
                 vec = symmetries[i] @ rotated_state - evals[i] * rotated_state
                 total += np.vdot(vec, vec).real 

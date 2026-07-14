@@ -1,86 +1,55 @@
 import argparse
-import pyscf
-import ffsim
+import bisect
+import json
+import time
+from math import comb
+from pathlib import Path
+from uuid import uuid4
+
+import matplotlib.pyplot as plt
 import numpy as np
 import scipy
 import scipy.sparse.linalg
-import json
 from tqdm import tqdm
-from pathlib import Path
-from itertools import product
-from math import comb
-import matplotlib.pyplot as plt
-import bisect
-from uuid import uuid4
 from mpi4py import MPI
 from mpi4py.futures import MPIPoolExecutor
 
-
-from chemistry import load_moldata, fcidump_data, CHEMICAL_PRECISION
-from optimize_symmetries import parity_matrix_to_quasisymmetries, x_to_rotation, get_fci, commutator_cost
+from chemistry import CHEMICAL_PRECISION, fcidump_data, load_moldata
+from optimize_symmetries import (
+    commutator_cost,
+    get_fci,
+    parity_matrix_to_quasisymmetries,
+    x_to_rotation,
+)
 from src.energy_diagnostics import (
     coupled_energy_perturbation,
     reference_coupled_energy_k,
     sector_data_from_gs_pairs,
     state_labels_for_columns,
 )
+from src.sector_utils import subspace_matrix, symmetry_sectors
+from src.clifford_sectors import (
+    build_clifford_frame,
+    candidate_hamiltonian,
+    candidate_reference_weights,
+    ci_vector_to_jw_state,
+    coupled_energy_curve,
+    load_symmetry_manifest,
+    molecular_hamiltonian_to_jw,
+    pauli_lcu_is_hermitian,
+    parse_sector_labels,
+    perturbative_coupled_energy_curve,
+    physical_sector_indices,
+    qubit_operator_to_data,
+    reference_candidate_order,
+    sector_state_candidates,
+    solve_tapered_sector,
+    tapered_operator,
+    z_symmetries_from_parity_matrix,
+)
 
-
-def symmetry_sectors(parity_matrix, norb, nelec):
-    dim = comb(norb, nelec[0]) * comb(norb, nelec[1])
-    if parity_matrix.shape[1] == norb:
-        bitstrings = ffsim.addresses_to_strings(range(dim), norb, nelec,
-            bitstring_type=ffsim.BitstringType.INT, concatenate=False)
-        bit_powers = 2**(np.arange(norb - 1, -1, -1))
-        bit_masks = parity_matrix[:, ::-1] @ bit_powers
-
-        sectors = {}
-        for i in range(dim):
-            ab_parities = bitstrings[0][i] ^ bitstrings[1][i]
-            sector_label = tuple(
-                (int.bit_count(int(ab_parities & q)) % 2
-                 for q in bit_masks)
-            )
-            sectors.setdefault(sector_label, []).append(i)
-
-        return sectors
-    elif parity_matrix.shape[1] == 2 * norb:
-        bit_powers = 2 ** (np.arange(2 * norb - 1, -1, -1))
-        reversed_interleaved_order = np.concatenate(
-            (np.arange(2 * norb - 2, -1, -2),
-             np.arange(2 * norb - 1, -1, -2),
-            )
-        )
-        bit_masks = parity_matrix[:, reversed_interleaved_order] @ bit_powers
-        bitstrings = ffsim.addresses_to_strings(range(dim), norb, nelec,
-            bitstring_type=ffsim.BitstringType.INT, concatenate=True)
-
-        sectors = {}
-        for i in range(dim):
-            sector_label = tuple(
-                (int.bit_count(int(bitstrings[i] & q)) % 2
-                 for q in bit_masks)
-            )
-            sectors.setdefault(sector_label, []).append(i)
-
-        return sectors
-    else:
-        raise ValueError()
-
-
-def subspace_matrix(A, support):
-    # dim = support.shape[0]
-    dim = len(support)
-
-    A_sub = np.zeros((dim, dim), dtype="complex")
-
-    for i, big_index in enumerate(support):
-        x = np.zeros(A.shape[0], dtype="complex")
-        x[big_index] = 1
-        y = A @ x
-        A_sub[:, i] = y[support]
-
-    return A_sub
+# Used by MPI worker processes (must be importable at module level).
+import ffsim
 
 
 def submatrix_eigenvalues_to_target(A: np.ndarray, e_target: float):
@@ -90,7 +59,6 @@ def submatrix_eigenvalues_to_target(A: np.ndarray, e_target: float):
     e_full, v_full = scipy.sparse.linalg.eigsh(A, which="SA", k=1)
     energies = np.zeros(A.shape[0])
     energies[0] = A[0, 0].real
-    # energies[0] = np.nan
 
     if e_full > e_target:
         return -1, v_full
@@ -102,9 +70,7 @@ def submatrix_eigenvalues_to_target(A: np.ndarray, e_target: float):
         order = np.argsort(abs(v_full.flatten()))[::-1]
         B = A[np.ix_(order, order)]
         for vec_count in tqdm(range(2, B.shape[0] + 1)):
-            # submatrix = A[:vec_count, :][:, :vec_count]
             submatrix = B[:vec_count, :vec_count]
-            # e, _ = scipy.sparse.linalg.eigsh(submatrix, which="SA", k=1)
             e, v = np.linalg.eigh(submatrix)
             energies[vec_count - 1] = e[0]
             if e[0] < e_target:
@@ -165,7 +131,7 @@ def orthogonalize_degenerate(w, V, tol=1e-10):
             end += 1
 
         # Orthogonalize this degenerate block
-        Q, _ = scipy.linalg.qr(V[:, start:end], mode='economic')
+        Q, _ = scipy.linalg.qr(V[:, start:end], mode="economic")
         V_orth[:, start:end] = Q
 
         start = end
@@ -173,35 +139,29 @@ def orthogonalize_degenerate(w, V, tol=1e-10):
 
 
 def find_first_negative(f, N):
-    # We create a range object from 1 to N.
-    # Note: range(1, N + 1) is lazy and takes O(1) memory.
     domain = range(1, N + 1)
-
-    # We use a key function that returns True (1) when negative
-    # and False (0) when positive/zero.
-    # Because False < True, this creates a virtual sorted array: [0, 0, ..., 1, 1]
     index = bisect.bisect_left(domain, x=True, key=lambda x: f(x) < 0)
-
-    # bisect_left returns the index in the 'domain' range object.
-    # If it returns N, it means it ran off the end and never found a negative.
     if index < len(domain):
         return domain[index]
-
     return -1
 
+
 def solve_eigs(data):
-    # mpi4py can't pickle the rotated_h_linop, so we will be constructing it on each worker?
+    # mpi4py can't pickle the rotated_h_linop, so reconstruct it on each worker.
+    from mpi4py import MPI
+
     moldata = data["moldata"]
     rotated_h = data["rotated_h"]
     sector_bitstrings = data["sector_bitstrings"]
-    rotated_h_linop = ffsim.linear_operator(rotated_h,
-                                            norb=moldata.norb,
-                                            nelec=moldata.nelec)
+    rotated_h_linop = ffsim.linear_operator(
+        rotated_h, norb=moldata.norb, nelec=moldata.nelec
+    )
 
     h_subspace = subspace_matrix(rotated_h_linop, sector_bitstrings)
     if data["states_per_sector"] <= h_subspace.shape[0] - 2:
         w, v = scipy.sparse.linalg.eigsh(
-            h_subspace, which="SA", k=data["states_per_sector"])
+            h_subspace, which="SA", k=data["states_per_sector"]
+        )
         v = v[:, np.argsort(w)]
         w = np.sort(w)
         v_orth = orthogonalize_degenerate(w, v)
@@ -209,96 +169,510 @@ def solve_eigs(data):
     else:
         sector_eigs = np.linalg.eigh(h_subspace)
 
-    return {"sector_label": data["sector_label"],
-            "sector_eigs": sector_eigs,
-            "rank": MPI.COMM_WORLD.Get_rank(),
-            "hostname": MPI.Get_processor_name()}
+    return {
+        "sector_label": data["sector_label"],
+        "sector_eigs": sector_eigs,
+        "rank": MPI.COMM_WORLD.Get_rank(),
+        "hostname": MPI.Get_processor_name(),
+    }
 
 
-if __name__=="__main__":
-    parser = argparse.ArgumentParser(
-        description="Calculate the metrics")
-    parser.add_argument("molpath",
-        help="path to the Hamiltonian (PySCF .chk or .FCIDUMP)")
-    parser.add_argument("parity_matrix",
-                        help="path to the incidence matrix of symmetries")
-    parser.add_argument("--U", help="x as orbital rotation",
-                        default=None)
+def _run_dmrg_from_oo_json(input_data, args, outname, out_data):
+    """MPS-native metrics path using OO JSON (molpath / parity / rotation)."""
+    from src.dmrg_diagnostics import format_metrics_report, run_dmrg_metrics
+    from src.dmrg_solver import (
+        Block2DMRGSolver,
+        DMRGConfig,
+        rotate_integrals,
+        rotation_from_parameters,
+    )
+
+    molpath = Path(input_data["molpath"])
+    parity_path = input_data.get("parity")
+    if parity_path is None:
+        raise SystemExit("DMRG metrics require a parity matrix in the OO JSON")
+    parity_matrix = np.atleast_2d(np.loadtxt(parity_path, dtype=int))
+
+    store_dir = args.wavefunction_dir
+    if store_dir is None:
+        store_dir = str(Path("wavefunctions") / (molpath.stem + "_metrics"))
+
+    if molpath.suffix == ".chk":
+        dumpdata = fcidump_data(str(molpath))
+        base = Block2DMRGSolver.from_dumpdata(
+            dumpdata, store_dir=None, n_threads=args.n_threads, save_integrals=False
+        )
+    else:
+        base = Block2DMRGSolver.from_fcidump(
+            molpath, store_dir=None, n_threads=args.n_threads, save_integrals=False
+        )
+    h1e, g2e, ecore = base.h1e, base.g2e, base.ecore
+    n_elec, spin = base.n_elec, base.spin
+
+    rotation = np.asarray(input_data.get("rotation", []), dtype=float)
+    if rotation.size:
+        h1e, g2e = rotate_integrals(
+            h1e, g2e, rotation_from_parameters(rotation, h1e.shape[0])
+        )
+
+    solver = Block2DMRGSolver(
+        h1e=h1e,
+        g2e=g2e,
+        ecore=ecore,
+        n_elec=n_elec,
+        spin=spin,
+        store_dir=store_dir,
+        n_threads=args.n_threads,
+        reorder=args.reorder,
+    )
+    states_per_sector = (
+        args.states_per_sector if args.states_per_sector < 50 else 5
+    )
+    report = run_dmrg_metrics(
+        solver,
+        parity_matrix,
+        config=DMRGConfig(max_bond_dim=args.bond_dim),
+        penalty=args.penalty,
+        max_sectors=args.max_sectors,
+        states_per_sector=states_per_sector,
+        compute_k=True,
+        compute_entanglement=args.entanglement,
+    )
+    lines = format_metrics_report(report)
+    for line in lines:
+        print(line)
+
+    out_data["solver"] = "dmrg"
+    out_data["report_lines"] = lines
+    out_data["E_FCI"] = report.e_reference
+    out_data["E_decoupled"] = report.decoupled.e_decoupled
+    out_data["dE"] = report.decoupled.dE
+    if report.coupled is not None:
+        out_data["E_coupled"] = report.coupled.e_coupled
+        out_data["K"] = report.coupled.k
+        out_data["converged"] = report.coupled.converged
+        out_data["sector_eigenstates"] = [
+            [list(label), int(idx)] for label, idx in report.coupled.chosen
+        ]
+    with open(outname, "a") as fp:
+        json.dump(out_data, fp, indent=2)
+    print("results written to", outname)
+
+
+def solve_tapered_task(data):
+    """Pickle-friendly worker for one Clifford-tapered sector."""
+    return solve_tapered_sector(
+        data["frame"],
+        tuple(data["label"]),
+        data["physical_indices"],
+        data["n_roots"],
+    )
+
+
+def load_clifford_symmetries(args, input_data, moldata):
+    """Load ordered Pauli symmetries from a manifest or legacy parity matrix."""
+    manifest_path = args.symmetry_manifest or input_data.get("symmetry_manifest")
+    if manifest_path:
+        manifest = load_symmetry_manifest(manifest_path)
+        return manifest["symmetries"], manifest["parity_matrix"], manifest_path
+
+    parity_path = input_data.get("parity")
+    if parity_path is None:
+        raise ValueError("Clifford backend needs a symmetry manifest or parity matrix")
+    parity_matrix = np.atleast_2d(np.loadtxt(parity_path, dtype=int))
+    symmetries = z_symmetries_from_parity_matrix(parity_matrix, moldata.norb)
+    return symmetries, parity_matrix, None
+
+
+def solve_clifford_sectors(frame, physical_sectors, labels, n_roots, parallel):
+    """Solve requested tapered sectors serially or with mpi4py futures."""
+    solve_frame = {
+        "hamiltonian": frame["hamiltonian"],
+        "n_symmetries": frame["n_symmetries"],
+        "n_residual_qubits": frame["n_residual_qubits"],
+    }
+    tasks = [
+        {
+            "frame": solve_frame,
+            "label": label,
+            "physical_indices": physical_sectors[label],
+            "n_roots": n_roots,
+        }
+        for label in labels
+    ]
+    results = {}
+    if parallel:
+        with MPIPoolExecutor() as executor:
+            iterator = executor.map(solve_tapered_task, tasks)
+            for result in iterator:
+                results[tuple(result["label"])] = result
+    else:
+        for task in tasks:
+            result = solve_tapered_task(task)
+            results[tuple(result["label"])] = result
+    return results
+
+
+def save_tapered_lcus(path, frame, sector_results, block_labels):
+    """Save diagonal and required off-diagonal tapered Pauli LCUs."""
+    diagonal = []
+    for label in sorted(sector_results):
+        diagonal.append(
+            {
+                "label": list(label),
+                "operator": qubit_operator_to_data(sector_results[label]["operator"]),
+            }
+        )
+
+    off_diagonal = []
+    for bra_label, ket_label in sorted(block_labels):
+        if bra_label == ket_label:
+            continue
+        operator = tapered_operator(frame, bra_label, ket_label)
+        if operator.terms:
+            off_diagonal.append(
+                {
+                    "bra_label": list(bra_label),
+                    "ket_label": list(ket_label),
+                    "operator": qubit_operator_to_data(operator),
+                }
+            )
+
+    data = {
+        "schema": "quasisymmetry.tapered_lcu",
+        "version": 1,
+        "hermitian_conjugate_blocks_implicit": True,
+        "n_parent_qubits": frame["n_qubits"],
+        "n_tapered_qubits": frame["n_residual_qubits"],
+        "n_symmetries": frame["n_symmetries"],
+        "diagonal": diagonal,
+        "off_diagonal": off_diagonal,
+    }
+    with Path(path).open("w") as file:
+        json.dump(data, file, indent=2)
+
+
+def run_clifford_metrics(args, input_data, out_data):
+    """Run decoupled and coupled metrics using tapered Pauli LCUs."""
+    start = time.time()
+    timings = {}
+
+    stage_start = time.time()
+    moldata = load_moldata(input_data["molpath"])
+    dumpdata = fcidump_data(input_data["molpath"])
+    symmetries, parity_matrix, manifest_path = load_clifford_symmetries(
+        args, input_data, moldata
+    )
+    timings["load_input"] = time.time() - stage_start
+
+    stage_start = time.time()
+    rotation_parameters = np.asarray(input_data["rotation"], dtype=float)
+    rotation = x_to_rotation(rotation_parameters, moldata.norb)
+    rotated_hamiltonian = moldata.hamiltonian.rotated(rotation)
+    jw_hamiltonian = molecular_hamiltonian_to_jw(rotated_hamiltonian, moldata.nelec)
+    frame = build_clifford_frame(jw_hamiltonian, symmetries, 2 * moldata.norb)
+    physical_sectors = physical_sector_indices(
+        moldata.norb,
+        moldata.nelec,
+        frame["clifford"],
+        frame["n_symmetries"],
+    )
+    timings["build_clifford_frame"] = time.time() - stage_start
+
+    requested_labels = parse_sector_labels(args.sector_labels, frame["n_symmetries"])
+    labels = sorted(physical_sectors) if requested_labels is None else requested_labels
+    missing = [label for label in labels if label not in physical_sectors]
+    if missing:
+        raise ValueError(f"requested sector labels have no physical determinants: {missing}")
+
+    n_roots = args.n_roots if args.n_roots is not None else args.states_per_sector
+    stage_start = time.time()
+    sector_results = solve_clifford_sectors(
+        frame,
+        physical_sectors,
+        labels,
+        n_roots,
+        args.parallel_sectors,
+    )
+    timings["solve_sectors"] = time.time() - stage_start
+
+    stage_start = time.time()
+    candidates = sector_state_candidates(sector_results)
+    h_coupled, block_cache = candidate_hamiltonian(frame, candidates)
+    timings["build_coupled_hamiltonian"] = time.time() - stage_start
+
+    stage_start = time.time()
+    exact_energy, fci_vector = get_fci(dumpdata)
+    rotated_fci_vector = ffsim.apply_orbital_rotation(
+        fci_vector,
+        rotation,
+        norb=moldata.norb,
+        nelec=moldata.nelec,
+    )
+    jw_reference = ci_vector_to_jw_state(
+        rotated_fci_vector,
+        moldata.norb,
+        moldata.nelec,
+    )
+    transformed_reference = frame["clifford"].transform_state(jw_reference)
+    reference_weights = candidate_reference_weights(
+        frame,
+        candidates,
+        transformed_reference,
+    )
+
+    if args.coupled_energy_method == "reference":
+        order = reference_candidate_order(reference_weights)
+        curve = coupled_energy_curve(
+            h_coupled,
+            order,
+            exact_energy=exact_energy,
+            tolerance=CHEMICAL_PRECISION,
+        )
+    else:
+        curve = perturbative_coupled_energy_curve(
+            h_coupled,
+            exact_energy=exact_energy,
+            tolerance=CHEMICAL_PRECISION,
+        )
+    timings["select_coupled_space"] = time.time() - stage_start
+
+    decoupled_energy = min(float(result["energies"][0]) for result in sector_results.values())
+    selected_count = curve["K"] if curve["K"] is not None else len(curve["order"])
+    selected_candidate_indices = curve["order"][:selected_count]
+    selected_candidates = [candidates[index] for index in selected_candidate_indices]
+    selected_sectors = sorted(set(candidate["label"] for candidate in selected_candidates))
+
+    out_data.update(
+        {
+            "sector_backend": "clifford",
+            "symmetry_manifest": manifest_path,
+            "parity_matrix": parity_matrix.tolist(),
+            "clifford": {
+                "synthesis_basis": "Z",
+                "generator_mapping": "positive_z",
+                "factor_descriptions": list(frame["clifford"].factor_descriptions),
+                "permutation": list(frame["clifford"].permutation),
+            },
+            "n_parent_qubits": frame["n_qubits"],
+            "n_tapered_qubits": frame["n_residual_qubits"],
+            "qubit_reduction": frame["n_symmetries"],
+            "n_symmetries": frame["n_symmetries"],
+            "sector_labels": [list(label) for label in labels],
+            "parent_jw_pauli_count": len(jw_hamiltonian.terms),
+            "parent_jw_lcu_one_norm": float(
+                sum(abs(complex(value)) for value in jw_hamiltonian.terms.values())
+            ),
+            "clifford_pauli_count": len(frame["hamiltonian"].terms),
+            "clifford_lcu_one_norm": float(
+                sum(abs(complex(value)) for value in frame["hamiltonian"].terms.values())
+            ),
+            "E_FCI": float(exact_energy),
+            "E_decoupled": decoupled_energy,
+            "dE": decoupled_energy - float(exact_energy),
+            "candidate_count": len(candidates),
+            "reference_weight_sum": float(np.sum(reference_weights)),
+            "K": curve["K"],
+            "converged": curve["converged"],
+            "E_coupled": curve["energies"][selected_count - 1] if curve["energies"] else None,
+            "coupled_curve": curve,
+            "sector_eigenstates": [
+                [list(candidate["label"]), candidate["root"]]
+                for candidate in selected_candidates
+            ],
+            "relevant_sectors": [list(label) for label in selected_sectors],
+            "relevant_sectors_count": len(selected_sectors),
+            "relevant_sectors_total_dim": sum(
+                sector_results[label]["dimension"] for label in selected_sectors
+            ),
+            "sector_results": [
+                {
+                    "label": list(label),
+                    "dimension": result["dimension"],
+                    "energies": [float(np.real(value)) for value in result["energies"]],
+                    "solver": result["solver"],
+                    "pauli_count": result["pauli_count"],
+                    "lcu_one_norm": result["lcu_one_norm"],
+                    "hermitian": pauli_lcu_is_hermitian(
+                        result["operator"], frame["n_residual_qubits"]
+                    ),
+                }
+                for label, result in sorted(sector_results.items())
+            ],
+            "timings": timings,
+        }
+    )
+
+    if args.save_tapered_lcu:
+        stage_start = time.time()
+        save_tapered_lcus(
+            args.save_tapered_lcu,
+            frame,
+            sector_results,
+            block_cache.keys(),
+        )
+        out_data["tapered_lcu_file"] = args.save_tapered_lcu
+        timings["serialize_tapered_lcu"] = time.time() - stage_start
+
+    timings["total"] = time.time() - start
+    out_data["elapsed"] = timings["total"]
+
+    print("Clifford backend")
+    print("  parent qubits:", frame["n_qubits"])
+    print("  tapered qubits:", frame["n_residual_qubits"])
+    print("  physical sectors:", len(sector_results))
+    print("  E_decoupled:", decoupled_energy)
+    print("  K:", curve["K"])
+    print("  converged:", curve["converged"])
+    return out_data
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Calculate the metrics")
+    parser.add_argument(
+        "input_data", help="JSON you got from optimize_symmetries.py"
+    )
+    parser.add_argument(
+        "--solver",
+        choices=("fci", "dmrg"),
+        default="fci",
+        help="diagnostics backend (default: fci; dmrg uses MPS-native E_dec/K)",
+    )
+    parser.add_argument("--bond_dim", type=int, default=250,
+                        help="DMRG bond dimension (only with --solver dmrg)")
+    parser.add_argument("--wavefunction_dir", default=None,
+                        help="local DMRG wavefunction store (dmrg solver)")
+    parser.add_argument("--n_threads", type=int, default=4,
+                        help="block2 threads (dmrg solver)")
+    parser.add_argument("--penalty", type=float, default=30.0,
+                        help="sector penalty for DMRG E_decoupled / K")
+    parser.add_argument("--max_sectors", type=int, default=16,
+                        help="max sectors to scan in DMRG diagnostics")
+    parser.add_argument("--reorder", choices=("fiedler", "gaopt"), default=None,
+                        help="optional orbital reordering before DMRG")
+    parser.add_argument("--entanglement", action="store_true",
+                        help="with --solver dmrg, also report orbital entropies")
     parser.add_argument("--states_per_sector", type=int, default=500)
+    parser.add_argument(
+        "--n_roots",
+        type=int,
+        default=None,
+        help="roots per tapered sector; defaults to --states_per_sector",
+    )
+    parser.add_argument(
+        "--sector_backend",
+        choices=("determinant", "clifford"),
+        default="determinant",
+        help="sector representation for FCI/Lanczos metrics",
+    )
+    parser.add_argument(
+        "--symmetry_manifest",
+        default=None,
+        help="ordered Z-product symmetry manifest for the Clifford backend",
+    )
+    parser.add_argument(
+        "--sector_labels",
+        default=None,
+        help="comma-separated binary tapered-sector labels, for example 000,011",
+    )
+    parser.add_argument(
+        "--parallel_sectors",
+        action="store_true",
+        help="solve tapered sectors through mpi4py worker processes",
+    )
+    parser.add_argument(
+        "--save_tapered_lcu",
+        default=None,
+        help="write diagonal and needed off-diagonal tapered Pauli LCUs to JSON",
+    )
+    parser.add_argument("--outname", default=None,
+                        help="output JSON path")
     parser.add_argument("--check_if_enough", action="store_true")
     parser.add_argument(
         "--coupled_energy_method",
         choices=("reference", "perturbation"),
         default="reference",
-        help="K_coupled selection: FCI-coefficient greedy (reference) or PT-screened greedy (perturbation)",
+        help="K_coupled selection: FCI-coefficient greedy (reference) or "
+             "PT-screened greedy (perturbation). Ignored for --solver dmrg "
+             "(always PT-screened).",
     )
     args = parser.parse_args()
 
-    p = Path(args.molpath)
+    with open(args.input_data, "r") as fp:
+        input_data = json.load(fp)
 
-    outname = "result_" + p.parts[-1] + "_" + str(uuid4())[:6] + ".txt"
-    with open(outname, "a") as fp:
-        fp.write(str(vars(args)) + "\n")
+    p = Path(input_data["molpath"])
+    outname = args.outname or (
+        "metrics_" + p.parts[-1] + "_" + str(uuid4())[:8] + ".json"
+    )
+    out_data = {"args": vars(args), "OO_data": input_data}
 
-    moldata = load_moldata(args.molpath)
-    dumpdata = fcidump_data(args.molpath)
+    if args.sector_backend == "clifford":
+        if args.solver != "fci":
+            parser.error(
+                "Clifford sector metrics currently use the fixed-spin "
+                "FCI/Lanczos backend"
+            )
+        run_clifford_metrics(args, input_data, out_data)
+        with open(outname, "w") as fp:
+            json.dump(out_data, fp, indent=2)
+        print("Saved metrics to", outname)
+        raise SystemExit(0)
 
-    parity_matrix = np.loadtxt(args.parity_matrix, dtype=int)
-    symmetries = parity_matrix_to_quasisymmetries(parity_matrix,
-                                                  moldata.norb,
-                                                  moldata.nelec)
+    if args.solver == "dmrg":
+        _run_dmrg_from_oo_json(input_data, args, outname, out_data)
+        raise SystemExit(0)
+
+    moldata = load_moldata(input_data["molpath"])
+    dumpdata = fcidump_data(input_data["molpath"])
+
+    parity_matrix = np.loadtxt(input_data["parity"], dtype=int)
+    symmetries = parity_matrix_to_quasisymmetries(
+        parity_matrix, moldata.norb, moldata.nelec
+    )
 
     print(parity_matrix)
 
     sectors = symmetry_sectors(parity_matrix, moldata.norb, moldata.nelec)
 
-    if args.U is not None:
-        x = np.loadtxt(args.U, comments=["#", "{"])
-        U = x_to_rotation(x, moldata.norb)
-    else:
-        U = np.eye(moldata.norb)
-        x = np.zeros(comb(moldata.norb, 2))
+    x = np.array(input_data["rotation"])
+    U = x_to_rotation(x, moldata.norb)
 
     rotated_h = moldata.hamiltonian.rotated(U)
-    rotated_h_linop = ffsim.linear_operator(rotated_h,
-                                            norb=moldata.norb,
-                                            nelec=moldata.nelec)
+    rotated_h_linop = ffsim.linear_operator(
+        rotated_h, norb=moldata.norb, nelec=moldata.nelec
+    )
 
     e_fci, fcivec = get_fci(dumpdata)
     print("FCI ", e_fci)
-    with open(outname, "a") as fp:
-        fp.write("E_FCI {0:4.6f}\n".format(e_fci))
-    rotated_fcivec = ffsim.apply_orbital_rotation(fcivec, U, norb=moldata.norb,
-                                                  nelec=moldata.nelec)
-
-    f = commutator_cost(moldata, symmetries, fcivec)
-    print("fci NC cost", f(x))
-    with open(outname, "a") as fp:
-        fp.write("fci NC cost {0:4.6f}\n".format(f(x)))
+    out_data["E_FCI"] = e_fci
+    rotated_fcivec = ffsim.apply_orbital_rotation(
+        fcivec, U, norb=moldata.norb, nelec=moldata.nelec
+    )
 
     print("qty of sectors ", len(sectors.keys()))
 
     comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()  # this process's ID, 0..size-1
-    size = comm.Get_size()  # total number of processes
+    rank = comm.Get_rank()
+    size = comm.Get_size()
     print("rank and size", rank, size)
 
-    tasks = [{"moldata": moldata,
-              "rotated_h": rotated_h,
-              "states_per_sector": args.states_per_sector,
-              "sector_label": k,
-              "sector_bitstrings": v
-              }
-             for k, v in sectors.items()]
+    tasks = [
+        {
+            "moldata": moldata,
+            "rotated_h": rotated_h,
+            "states_per_sector": args.states_per_sector,
+            "sector_label": k,
+            "sector_bitstrings": v,
+        }
+        for k, v in sectors.items()
+    ]
 
     sector_eigs = {}
-
-    # maybe restore the old way and run it if size == 1?
     with MPIPoolExecutor() as executor:
         for r in executor.map(solve_eigs, tasks):
             label = tuple(r["sector_label"])
-            sector_eigs[label]= r["sector_eigs"]
-
+            sector_eigs[label] = r["sector_eigs"]
 
     sector_gs_energies = []
     for w, v in sector_eigs.items():
@@ -306,22 +680,10 @@ if __name__=="__main__":
 
     smallest = np.min(sector_gs_energies)
 
-    # sector_dims = [len(sector_bistrings) for sector_bistrings in sectors.values()]
-    # maxdim = max(sector_dims)
-    # print("Largest subspace dimension", maxdim)
-    # with open(outname, "a") as fp:
-    #     fp.write("maxdim {0:}\n".format(maxdim))
-
     de_dec = smallest - e_fci
     print("Decoupled error ", smallest - e_fci)
-    with open(outname, "a") as fp:
-        fp.write("E_decoupled {0:4.6f}\n".format(smallest))
-        fp.write("dE {0:4.6f}\n".format(de_dec))
-    # if de_dec < 0.0016:
-    #     print("K = 1")
-    #     with open(outname, "a") as fp:
-    #         fp.write("K 1")
-    #     quit()
+    out_data["E_decoupled"] = smallest
+    out_data["dE"] = de_dec
 
     h_apply = lambda v: rotated_h_linop @ v
 
@@ -339,28 +701,21 @@ if __name__=="__main__":
         print("E_coupled", e_coupled)
         print("K", k_coupled)
         print("converged", converged)
-        with open(outname, "a") as fp:
-            fp.write("E_coupled {0:4.6f}\n".format(e_coupled))
-            fp.write("K {0:}\n".format(k_coupled))
-            fp.write("converged {0:}\n".format(converged))
-        # if converged:
-            # print("Sector eigenstates used (sector and excitation level):")
-            # with open(outname, "a") as fp:
-            #     for key in chosen_keys:
-            #         print(key)
-            #         fp.write(str(key) + "\n")
+        out_data["E_coupled"] = e_coupled
+        out_data["K"] = k_coupled
+        out_data["converged"] = converged
         if not converged:
             print("PT coupled-energy did not converge within chemical precision")
 
     elif args.coupled_energy_method == "reference":
-
         print("Calculating K directly from FCI (reference wavefunction)")
 
         full_space_vectors = []
         for k, v in sectors.items():
-            full_space_vectors_in_sector = np.zeros((rotated_h_linop.shape[0],
-                                                     sector_eigs[k][0].shape[0]),
-                                                    dtype="complex")
+            full_space_vectors_in_sector = np.zeros(
+                (rotated_h_linop.shape[0], sector_eigs[k][0].shape[0]),
+                dtype="complex",
+            )
             full_space_vectors_in_sector[v, :] = sector_eigs[k][1]
             full_space_vectors.append(full_space_vectors_in_sector)
         full_space_vectors_cat = np.concatenate(full_space_vectors, axis=1)
@@ -373,46 +728,32 @@ if __name__=="__main__":
             chemical_precision=CHEMICAL_PRECISION,
         )
         print("E_coupled (full projection)", e_coupled)
+        out_data["K"] = k_min
         if k_min is None:
-            with open(outname, "a") as fp:
-                fp.write("coupled_energy_method reference\n")
-                fp.write("Not enough states per sector\n")
             print("Not enough states per sector")
             quit()
 
         print("K ", k_min)
-        with open(outname, "a") as fp:
-            fp.write("K {0:}\n".format(k_min))
 
         all_state_labels = state_labels_for_columns(sector_eigs)
-
-        # with open(outname, "a") as fp:
-        #     for i in range(k_min):
-        #         print(all_state_labels[weights_order[i]])
-        #         fp.write(str(all_state_labels[weights_order[i]]) + "\n")
-
         chosen_keys = [all_state_labels[weights_order[i]] for i in range(k_min)]
 
     print("Sector eigenstates used (sector and excitation level):")
+    for key in chosen_keys:
+        print(key)
+    out_data["sector_eigenstates"] = chosen_keys
+
+    unique_sectors_used = list({w[0] for w in chosen_keys})
+    total_dim_of_relevant_sectors = 0
+    print("Relevant sectors and their dimensions:")
+    for s in unique_sectors_used:
+        print(s, len(sectors[s]))
+        total_dim_of_relevant_sectors += len(sectors[s])
+    print("{0:} sectors in total".format(len(unique_sectors_used)))
+    print("Total dimension: {0:}".format(total_dim_of_relevant_sectors))
+
+    out_data["relevant_sectors"] = unique_sectors_used
+    out_data["relevant_sectors_count"] = len(unique_sectors_used)
+    out_data["relevant_sectors_total_dim"] = total_dim_of_relevant_sectors
     with open(outname, "a") as fp:
-        fp.write("Sector eigenstates used (sector and excitation level):\n")
-        for key in chosen_keys:
-            print(key)
-            fp.write(str(key) + "\n")
-
-        unique_sectors_used = set([w[0] for w in chosen_keys])
-        total_dim_of_relevant_sectors = 0
-        print("Relevant sectors and their dimensions:")
-        fp.write("Relevant sectors and their dimensions:\n")
-        for s in unique_sectors_used:
-            print(s, len(sectors[s]))
-            fp.write(str(s) + " " + str(len(sectors[s])) + "\n")
-            total_dim_of_relevant_sectors += len(sectors[s])
-        print("{0:} sectors in total".format(len(unique_sectors_used)))
-        fp.write("{0:} sectors in total\n".format(len(unique_sectors_used)))
-        print("Total dimension: {0:}".format(total_dim_of_relevant_sectors))
-        fp.write("Total dimension: {0:}\n".format(total_dim_of_relevant_sectors))
-
-
-
-
+        json.dump(out_data, fp, indent=2)
