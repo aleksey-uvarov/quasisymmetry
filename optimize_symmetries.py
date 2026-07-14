@@ -63,6 +63,8 @@ except ImportError as exc:
 else:
     _FCI_STACK_ERROR = None
 
+from src.workflow_cli import add_optimize_workflow_args
+
 
 def commutator_cost(moldata: ffsim.MolecularData,
                     symmetries: list[scipy.sparse.linalg.LinearOperator],
@@ -473,26 +475,7 @@ if __name__=="__main__":
     parser.add_argument("parity", nargs="?", default=None,
                         help="path to the incidence matrix of symmetries")
     parser.add_argument("--seniority", action="store_true")
-    parser.add_argument(
-        "--reference",
-        choices=("fci", "hf", "dmrg"),
-        default="fci",
-        help="reference state (dmrg: MPS ground state; with --backend statevector "
-             "the MPS is reconstructed as a CI vector)",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=("statevector", "dmrg"),
-        default="statevector",
-        help="cost evaluation backend: statevector (ffsim/FCI, default) or "
-             "dmrg (MPS-native NC/variance; scales beyond FCI)",
-    )
-    parser.add_argument("--bond_dim", type=int, default=250,
-                        help="DMRG bond dimension (--reference/--backend dmrg)")
-    parser.add_argument("--wavefunction_dir", default=None,
-                        help="local DMRG wavefunction store to reuse/create")
-    parser.add_argument("--n_threads", type=int, default=4,
-                        help="block2 threads (dmrg backend / reference)")
+    add_optimize_workflow_args(parser)
     parser.add_argument("--multiply_bond_dim", type=int, default=None,
                         help="bond dimension for MPO-MPS multiplies (dmrg backend)")
     parser.add_argument("--multiply_sweeps", type=int, default=8,

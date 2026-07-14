@@ -1,3 +1,28 @@
+#### Install
+
+```bash
+git clone --recurse-submodules https://github.com/aleksey-uvarov/quasisymmetry.git
+cd quasisymmetry
+
+python -m pip install -U pip
+python -m pip install numpy scipy matplotlib tqdm mpi4py
+python -m pip install pyscf ffsim openfermion openfermionpyscf
+python -m pip install block2
+```
+
+`block2` is required for any `--reference dmrg` / `--backend dmrg` path. `pyscf` / `ffsim` are required for FCI/statevector and for `--backend davidson` in metrics. On Windows, prefer a conda/binary build of `block2` and `pyscf` if pip tries to compile from source.
+
+#### Workflow axes (unified)
+
+Everywhere in the pipeline, the same two axes appear:
+
+| Flag | Meaning | `optimize_symmetries.py` | `metrics.py` |
+|------|---------|--------------------------|--------------|
+| `--reference` | ground-truth state/energy | `fci` \| `hf` \| `dmrg` | `fci` \| `dmrg` (default follows backend) |
+| `--backend` | how the heavy linear algebra runs | `statevector` \| `dmrg` | `fci` \| `davidson` \| `dmrg` |
+
+`dmrg` always means Block2; shared flags are `--bond_dim`, `--wavefunction_dir`, `--n_threads` (defined in `src/workflow_cli.py`). In metrics, `--solver` is kept as an alias of `--backend`.
+
 # Approximate symmetry finder (small systems)
 
 This is a summary of the module that I am making by stitching together Praveen’s code with Linjun’s and mine.
@@ -35,7 +60,7 @@ Input arguments and keywords:
 1. Hamiltonian. Checkfile or FCIDUMP. In the future I might add support for of.QubitOperator.  
 2. Parity matrix of the symmetries (or \--seniority)  
 3. Reference state: \--reference, “fci”, “hf”, “dmrg” (defaults to fci). With “dmrg”, \--bond\_dim / \--wavefunction\_dir control the MPS store.  
-4. Cost backend: \--backend statevector|dmrg (default statevector). The dmrg backend evaluates NC/variance with MPS-native multiplies on a fixed DMRG reference (``||[H(U), S] U|ψ⟩|| = ||[H, U†SU]|ψ⟩||``).  
+4. Cost backend: \--backend statevector|dmrg (default statevector). The dmrg backend evaluates NC/variance with MPS-native multiplies on a fixed DMRG reference (``||[H(U), S] U|ψ⟩|| = ||[H, U†SU]|ψ⟩||``). Same Block2 stack as metrics ``--backend dmrg``.  
 5. Cost function: NC, variance, decoupled, fixed\_sector, switching\_sector (decoupled / sector modes are statevector/FCI only)  
 6. x0: optional initial guess for orbital rotations
 
@@ -82,13 +107,25 @@ Core library: `src/dmrg_solver.py` (`Block2DMRGSolver`). MPS-native costs: `src/
 Inputs:
 
 1. JSON from ``optimize_symmetries.py`` (molpath, parity, rotation, …)  
-2. \--solver fci|dmrg — with `dmrg`, runs MPS-native E_decoupled / PT-screened K; \--bond\_dim, \--wavefunction\_dir, \--penalty, \--max\_sectors, \--reorder, \--entanglement as in solve\_dmrg.py
+2. \--backend fci|davidson|dmrg (alias: \--solver) — sector eigensolver; with `dmrg`, runs MPS-native E_decoupled / PT-screened K  
+3. \--reference fci|dmrg — reference energy/state for dE and reference-K (defaults to dmrg when ``--backend dmrg``, else fci)  
+4. Shared DMRG flags: \--bond\_dim, \--wavefunction\_dir, \--n\_threads; also \--penalty, \--max\_sectors, \--reorder, \--entanglement as in solve\_dmrg.py  
+5. Davidson flags (only with ``--backend davidson``): \--davidson\_tol, \--davidson\_max\_cycle, \--davidson\_max\_space
+
+Compare sector methods on the same OO JSON:
+
+```bash
+python metrics.py oo.json --backend fci
+python metrics.py oo.json --backend davidson --davidson_tol 1e-10
+python metrics.py oo.json --backend dmrg --bond_dim 250 --penalty 30
+```
 
 Outputs:
 
 1. Decoupled energy  
 2. K: number of sector eigenstates needed to reach chemical accuracy  
-3. Which sectors do these eigenstates come from
+3. Which sectors do these eigenstates come from  
+4. ``backend`` / ``reference`` / ``solve_time_s`` (and Davidson per-sector meta when applicable)
 
 All of this is saved in a JSON file.
 
