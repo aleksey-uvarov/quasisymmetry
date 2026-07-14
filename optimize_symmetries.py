@@ -120,11 +120,12 @@ def variance_cost_general(moldata: ffsim.MolecularData,
     return f
 
 """Cost function based on eigenvalue equation residuals, measuring how well rotated state satisfies eval equation for each symmetry operator.
-Similar in spirit as variance-based, but more efficient for parities.
+Similar in spirit as variance-based, but more efficient for
+parities using only_parities=True.
 
 Key differences from variance-based cost function:
 - additional arg evals: list of symmetry eigenvalues, to be precomputed by rounding <psi|S_i|psi>
-- parity-speficic path (only_parities=True): instead of maximizing |<psi|U^dag S_i|psi>|^2,
+- parity-specific path (only_parities=True): instead of maximizing |<psi|U^dag S_i|psi>|^2,
 maximize (minimize) <psi|U^dag S_i|psi> for evals_i = +1 (-1).
 """
 def eval_eq_cost(symmetries: list, evals: list,
